@@ -2,6 +2,9 @@ const t = require('tap')
 const { basename } = require('node:path')
 const tmock = require('../../fixtures/tmock')
 const mockNpm = require('../../fixtures/mock-npm')
+const fs = require('node:fs/promises')
+const npa = require('npm-package-arg')
+const { manifest } = require('pacote')
 
 const CURRENT_VERSION = '123.420.69'
 const CURRENT_MAJOR = '122.420.69'
@@ -23,28 +26,30 @@ const runUpdateNotifier = async (t, {
   prefixDir,
   version = CURRENT_VERSION,
   argv = [],
-  wroteFile = false,
   ...config
 } = {}) => {
+  const fsUses = {
+    stat: [],
+    writeFile: [],
+  }
+
   const mockFs = {
-    ...require('node:fs/promises'),
+    ...fs,
     stat: async (path) => {
-      if (basename(path) !== '_update-notifier-last-checked') {
-        t.fail('no stat allowed for non upate notifier files')
+      const base = basename(path)
+      const exclude = ['node', 'package.json', 'node_modules', 'package.json']
+      if (!exclude.includes(base)) {
+        fsUses.stat.push(base)
       }
+
       if (STAT_ERROR) {
         throw STAT_ERROR
       }
       return { mtime: new Date(STAT_MTIME) }
     },
-    writeFile: async (path, content) => {
-      wroteFile = true
-      if (content !== '') {
-        t.fail('no write file content allowed')
-      }
-      if (basename(path) !== '_update-notifier-last-checked') {
-        t.fail('no writefile allowed for non upate notifier files')
-      }
+    writeFile: async (path) => {
+      const base = basename(path)
+      fsUses.writeFile.push(base)
       if (WRITE_ERROR) {
         throw WRITE_ERROR
       }
@@ -53,16 +58,19 @@ const runUpdateNotifier = async (t, {
 
   const MANIFEST_REQUEST = []
   const mockPacote = {
-    manifest: async (spec) => {
-      if (!spec.match(/^npm@/)) {
-        t.fail('no pacote manifest allowed for non npm packages')
+    manifest: async (_spec) => {
+      const spec = npa(_spec)
+      MANIFEST_REQUEST.push(spec.raw)
+
+      if (spec.raw === '.') {
+        return manifest(spec)
       }
-      MANIFEST_REQUEST.push(spec)
+
       if (PACOTE_ERROR) {
         throw PACOTE_ERROR
       }
-      const manifestV = spec === 'npm@latest' ? CURRENT_VERSION
-        : /-/.test(spec) ? CURRENT_BETA : NEXT_VERSION
+      const manifestV = spec.raw === 'npm@latest' ? CURRENT_VERSION
+        : /-/.test(spec.raw) ? CURRENT_BETA : NEXT_VERSION
       return { version: manifestV }
     },
   }
@@ -88,132 +96,189 @@ const runUpdateNotifier = async (t, {
   const result = await updateNotifier(mock.npm)
 
   return {
-    wroteFile,
     result,
+    fsUses,
     MANIFEST_REQUEST,
   }
 }
 
 t.test('duration has elapsed, no updates', async t => {
-  const { wroteFile, result, MANIFEST_REQUEST } = await runUpdateNotifier(t)
-  t.equal(wroteFile, true)
+  const { fsUses, result, MANIFEST_REQUEST } = await runUpdateNotifier(t)
+  t.same(fsUses, {
+    stat: ['_update-notifier-last-checked'],
+    writeFile: ['_update-notifier-last-checked'],
+  })
   t.not(result)
-  t.equal(MANIFEST_REQUEST.length, 1)
+  t.same(MANIFEST_REQUEST, [
+    'npm@latest',
+  ])
 })
 
 t.test('situations in which we do not notify', t => {
   t.test('nothing to do if notifier disabled', async t => {
-    const { wroteFile, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, {
+    const { fsUses, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, {
       'update-notifier': false,
     })
-    t.equal(wroteFile, false)
-    t.equal(result, null)
-    t.strictSame(MANIFEST_REQUEST, [], 'no requests for manifests')
+    t.same(fsUses, {
+      stat: [],
+      writeFile: [],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, [])
   })
 
   t.test('do not suggest update if already updating', async t => {
-    const { wroteFile, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, {
+    const { fsUses, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, {
       command: 'install',
       prefixDir: { 'package.json': `{"name":"${t.testName}"}` },
       argv: ['npm'],
       global: true,
     })
-    t.equal(wroteFile, false)
-    t.equal(result, null)
-    t.strictSame(MANIFEST_REQUEST, [], 'no requests for manifests')
+    t.same(fsUses, {
+      stat: [],
+      writeFile: [],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, ['.'])
   })
 
   t.test('do not suggest update if already updating with spec', async t => {
-    const { wroteFile, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, {
+    const { fsUses, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, {
       command: 'install',
       prefixDir: { 'package.json': `{"name":"${t.testName}"}` },
       argv: ['npm@latest'],
       global: true,
     })
-    t.equal(wroteFile, false)
-    t.equal(result, null)
-    t.strictSame(MANIFEST_REQUEST, [], 'no requests for manifests')
+    t.same(fsUses, {
+      stat: [],
+      writeFile: [],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, ['.'])
   })
 
   t.test('do not update if same as latest', async t => {
-    const { wroteFile, result, MANIFEST_REQUEST } = await runUpdateNotifier(t)
-    t.equal(wroteFile, true)
-    t.equal(result, null)
-    t.strictSame(MANIFEST_REQUEST, ['npm@latest'], 'requested latest version')
+    const { fsUses, result, MANIFEST_REQUEST } = await runUpdateNotifier(t)
+    t.same(fsUses, {
+      stat: ['_update-notifier-last-checked'],
+      writeFile: ['_update-notifier-last-checked'],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, [
+      'npm@latest',
+    ])
   })
+
   t.test('check if stat errors (here for coverage)', async t => {
     const STAT_ERROR = new Error('blorg')
-    const { wroteFile, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, { STAT_ERROR })
-    t.equal(wroteFile, true)
-    t.equal(result, null)
-    t.strictSame(MANIFEST_REQUEST, ['npm@latest'], 'requested latest version')
+    const { fsUses, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, { STAT_ERROR })
+    t.same(fsUses, {
+      stat: ['_update-notifier-last-checked'],
+      writeFile: ['_update-notifier-last-checked'],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, [
+      'npm@latest',
+    ])
   })
+
   t.test('ok if write errors (here for coverage)', async t => {
     const WRITE_ERROR = new Error('grolb')
-    const { wroteFile, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, { WRITE_ERROR })
-    t.equal(wroteFile, true)
-    t.equal(result, null)
-    t.strictSame(MANIFEST_REQUEST, ['npm@latest'], 'requested latest version')
+    const { fsUses, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, { WRITE_ERROR })
+    t.same(fsUses, {
+      stat: ['_update-notifier-last-checked'],
+      writeFile: ['_update-notifier-last-checked'],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, [
+      'npm@latest',
+    ])
   })
+
   t.test('ignore pacote failures (here for coverage)', async t => {
     const PACOTE_ERROR = new Error('pah-KO-tchay')
-    const { wroteFile, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, { PACOTE_ERROR })
-    t.equal(result, null)
-    t.equal(wroteFile, true)
-    t.strictSame(MANIFEST_REQUEST, ['npm@latest'], 'requested latest version')
+    const { fsUses, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, { PACOTE_ERROR })
+    t.same(fsUses, {
+      stat: ['_update-notifier-last-checked'],
+      writeFile: ['_update-notifier-last-checked'],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, [
+      'npm@latest',
+    ])
   })
+
   t.test('do not update if newer than latest, but same as next', async t => {
     const {
-      wroteFile,
+      fsUses,
       result,
       MANIFEST_REQUEST,
     } = await runUpdateNotifier(t, { version: NEXT_VERSION })
-    t.equal(result, null)
-    t.equal(wroteFile, true)
-    const reqs = ['npm@latest', `npm@^${NEXT_VERSION}`]
-    t.strictSame(MANIFEST_REQUEST, reqs, 'requested latest and next versions')
+    t.same(fsUses, {
+      stat: ['_update-notifier-last-checked', '_update-notifier-last-checked'],
+      writeFile: ['_update-notifier-last-checked', '_update-notifier-last-checked'],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, [
+      'npm@latest',
+      `npm@^${NEXT_VERSION}`,
+    ])
   })
+
   t.test('do not update if on the latest beta', async t => {
     const {
-      wroteFile,
+      fsUses,
       result,
       MANIFEST_REQUEST,
     } = await runUpdateNotifier(t, { version: CURRENT_BETA })
-    t.equal(result, null)
-    t.equal(wroteFile, true)
-    const reqs = [`npm@^${CURRENT_BETA}`]
-    t.strictSame(MANIFEST_REQUEST, reqs, 'requested latest and next versions')
+    t.same(fsUses, {
+      stat: ['_update-notifier-last-checked'],
+      writeFile: ['_update-notifier-last-checked'],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, [
+      `npm@^${CURRENT_BETA}`,
+    ])
   })
 
   t.test('do not update in CI', async t => {
-    const { wroteFile, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, { mocks: {
+    const { fsUses, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, { mocks: {
       'ci-info': { isCI: true, name: 'something' },
     } })
-    t.equal(wroteFile, false)
-    t.equal(result, null)
-    t.strictSame(MANIFEST_REQUEST, [], 'no requests for manifests')
+    t.same(fsUses, {
+      stat: [],
+      writeFile: [],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, [])
   })
 
   t.test('only check weekly for GA releases', async t => {
     // One week (plus five minutes to account for test environment fuzziness)
     const STAT_MTIME = Date.now() - 1000 * 60 * 60 * 24 * 7 + 1000 * 60 * 5
-    const { wroteFile, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, { STAT_MTIME })
-    t.equal(wroteFile, false, 'duration was not reset')
-    t.equal(result, null)
-    t.strictSame(MANIFEST_REQUEST, [], 'no requests for manifests')
+    const { fsUses, result, MANIFEST_REQUEST } = await runUpdateNotifier(t, { STAT_MTIME })
+    t.same(fsUses, {
+      stat: ['_update-notifier-last-checked'],
+      writeFile: [],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, [])
   })
 
   t.test('only check daily for betas', async t => {
     // One day (plus five minutes to account for test environment fuzziness)
     const STAT_MTIME = Date.now() - 1000 * 60 * 60 * 24 + 1000 * 60 * 5
     const {
-      wroteFile,
+      fsUses,
       result,
       MANIFEST_REQUEST,
     } = await runUpdateNotifier(t, { STAT_MTIME, version: HAVE_BETA })
-    t.equal(wroteFile, false, 'duration was not reset')
-    t.equal(result, null)
-    t.strictSame(MANIFEST_REQUEST, [], 'no requests for manifests')
+    t.same(fsUses, {
+      stat: ['_update-notifier-last-checked'],
+      writeFile: [],
+    })
+    t.not(result)
+    t.same(MANIFEST_REQUEST, [])
   })
 
   t.end()
@@ -221,25 +286,28 @@ t.test('situations in which we do not notify', t => {
 
 t.test('notification situations', async t => {
   const cases = {
-    [HAVE_BETA]: [`^{V}`],
-    [NEXT_PATCH]: [`latest`, `^{V}`],
-    [NEXT_MINOR]: [`latest`, `^{V}`],
-    [CURRENT_PATCH]: ['latest'],
-    [CURRENT_MINOR]: ['latest'],
-    [CURRENT_MAJOR]: ['latest'],
+    [HAVE_BETA]: [`npm@^${HAVE_BETA}`],
+    [NEXT_PATCH]: [`npm@latest`, `npm@^${NEXT_PATCH}`],
+    [NEXT_MINOR]: [`npm@latest`, `npm@^${NEXT_MINOR}`],
+    [CURRENT_PATCH]: ['npm@latest'],
+    [CURRENT_MINOR]: ['npm@latest'],
+    [CURRENT_MAJOR]: ['npm@latest'],
   }
-
   for (const [version, reqs] of Object.entries(cases)) {
     for (const color of [false, 'always']) {
       await t.test(`${version} - color=${color}`, async t => {
         const {
-          wroteFile,
+          fsUses,
           result,
           MANIFEST_REQUEST,
         } = await runUpdateNotifier(t, { version, color })
+        t.ok(result)
         t.matchSnapshot(result)
-        t.equal(wroteFile, true)
-        t.strictSame(MANIFEST_REQUEST, reqs.map(r => `npm@${r.replace('{V}', version)}`))
+        t.same(fsUses, {
+          stat: reqs.map(() => '_update-notifier-last-checked'),
+          writeFile: reqs.map(() => '_update-notifier-last-checked'),
+        })
+        t.strictSame(MANIFEST_REQUEST, reqs)
       })
     }
   }
