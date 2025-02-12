@@ -80,9 +80,11 @@ t.test('--prefix', async t => {
 
   await registry.package({
     manifest,
+    times: 2,
     tarballs: {
       '1.0.0': path.join(npm.prefix, 'npm-exec-test'),
-    } })
+    },
+  })
 
   await npm.exec('exec', ['@npmcli/npx-test'])
   const exists = await fs.stat(path.join(npm.prefix, 'npm-exec-test-success'))
@@ -123,6 +125,7 @@ t.test('runs in workspace path', async t => {
   })
 
   await registry.package({ manifest,
+    times: 2,
     tarballs: {
       '1.0.0': path.join(npm.prefix, 'npm-exec-test'),
     },
@@ -243,16 +246,9 @@ t.test('npx --no-install @npmcli/npx-test', async t => {
     },
   })
 
-  try {
+  await t.rejects(async () => {
     await npm.exec('exec', ['@npmcli/npx-test'])
-    t.fail('Expected error was not thrown')
-  } catch (error) {
-    t.match(
-      error.message,
-      'npx canceled due to missing packages and no YES option: ',
-      'Expected error message thrown'
-    )
-  }
+  }, 'npx canceled due to missing packages and no YES option: ')
 })
 
 t.test('packs from git spec', async t => {
