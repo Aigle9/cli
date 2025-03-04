@@ -5,7 +5,6 @@ const { read } = require('read')
 const Table = require('cli-table3')
 const { run, git, npm, pkgPath: cliPath, pkg: cli, spawn } = require('./util.js')
 const fs = require('fs').promises
-const path = require('path')
 
 const resetdeps = () => npm('run', 'resetdeps')
 
