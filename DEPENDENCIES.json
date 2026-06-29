@@ -53,15 +53,12 @@
     "npm-install-checks",
     "npm-bundled",
     "@npmcli/fs",
-    "unique-filename",
     "npm-packlist",
     "@npmcli/mock-globals",
     "bin-links",
     "nopt",
     "parse-conflict-json",
-    "read-package-json-fast",
-    "read",
-    "normalize-package-data"
+    "read"
   ],
   [
     "@npmcli/eslint-config",
@@ -77,7 +74,6 @@
     "json-parse-even-better-errors",
     "@npmcli/node-gyp",
     "ssri",
-    "unique-slug",
     "@npmcli/redact",
     "@npmcli/agent",
     "minipass-fetch",

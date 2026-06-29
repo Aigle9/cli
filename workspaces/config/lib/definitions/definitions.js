@@ -1,4 +1,5 @@
 const Definition = require('./definition.js')
+const parseAllowScriptsList = require('../parse-allow-scripts-list.js')
 
 const ciInfo = require('ci-info')
 const querystring = require('node:querystring')
@@ -153,28 +154,34 @@ const definitions = {
     defaultDescription: `
     'public' for new packages, existing packages it will not change the current level
   `,
-    type: [null, 'restricted', 'public'],
+    type: [null, 'restricted', 'public', 'private'],
     description: `
     If you do not want your scoped package to be publicly viewable (and
     installable) set \`--access=restricted\`.
 
-    Unscoped packages can not be set to \`restricted\`.
+    Unscoped packages cannot be set to \`restricted\`.
 
     Note: This defaults to not changing the current access level for existing
     packages.  Specifying a value of \`restricted\` or \`public\` during
     publish will change the access for an existing package the same way that
     \`npm access set status\` would.
+
+    The value \`private\` is an alias for \`restricted\`.
   `,
-    flatten,
+    flatten (key, obj, flatOptions) {
+      const value = obj[key]
+      flatOptions.access = value === 'private' ? 'restricted' : value
+    },
   }),
   all: new Definition('all', {
     default: false,
     type: Boolean,
     short: 'a',
     description: `
-    When running \`npm outdated\` and \`npm ls\`, setting \`--all\` will show
-    all outdated or installed packages, rather than only those directly
-    depended upon by the current project.
+    Show or act on all packages, not just the ones your project directly
+    depends on. For \`npm outdated\` and \`npm ls\` this lists every outdated
+    or installed package. For \`npm approve-scripts\` and \`npm deny-scripts\`
+    it selects every package with pending install scripts.
   `,
     flatten,
   }),
@@ -186,6 +193,104 @@ const definitions = {
     version to the same value as the current version.
   `,
     flatten,
+  }),
+  'allow-directory': new Definition('allow-directory', {
+    default: 'all',
+    type: ['all', 'none', 'root'],
+    description: `
+      Limits the ability for npm to install dependencies from directories.
+      That is, dependencies that point to a directory instead of a version or semver range.
+      Please note that this could leave your tree incomplete and some packages may not function as intended or designed.
+      Changing this setting will not remove dependencies that are already installed.
+
+      \`all\` allows any directories to be installed.
+      \`none\` prevents any directories from being installed.
+      \`root\` only allows directories defined in your project's package.json to be installed.  Also allows directory dependencies to be used for other commands like \`npm view\`
+  `,
+    flatten,
+  }),
+  'allow-file': new Definition('allow-file', {
+    default: 'all',
+    type: ['all', 'none', 'root'],
+    description: `
+      Limits the ability for npm to install dependencies from tarball files.
+      That is, dependencies that point to a local tarball file instead of a version or semver range.
+      Please note that this could leave your tree incomplete and some packages may not function as intended or designed.
+      Changing this setting will not remove dependencies that are already installed.
+
+      \`all\` allows any tarball file to be installed.
+      \`none\` prevents any tarball file from being installed.
+      \`root\` only allows tarball files defined in your project's package.json to be installed.  Also allows tarball file dependencies to be used for other commands like \`npm view\`
+  `,
+    flatten,
+  }),
+  'allow-git': new Definition('allow-git', {
+    default: 'none',
+    type: ['all', 'none', 'root'],
+    description: `
+      Limits the ability for npm to fetch dependencies from git references.
+      That is, dependencies that point to a git repo instead of a version or semver range.
+      Please note that this could leave your tree incomplete and some packages may not function as intended or designed.
+      Changing this setting will not remove dependencies that are already installed.
+
+      As of npm 12 the default is \`none\`. Git dependencies run \`git\`
+      against a remote repo and may install configuration the project does
+      not control. Opt in explicitly per project (in \`.npmrc\`) or per
+      command (on the CLI) when you need git deps.
+
+      \`all\` allows any git dependencies to be fetched and installed.
+      \`none\` prevents any git dependencies from being fetched and installed.
+      \`root\` only allows git dependencies defined in your project's package.json to be fetched and installed.  Also allows git dependencies to be fetched for other commands like \`npm view\`
+  `,
+    flatten,
+  }),
+  'allow-remote': new Definition('allow-remote', {
+    default: 'none',
+    type: ['all', 'none', 'root'],
+    description: `
+      Limits the ability for npm to fetch dependencies from urls.
+      That is, dependencies that point to a tarball url instead of a version or semver range.
+      Please note that this could leave your tree incomplete and some packages may not function as intended or designed.
+      Changing this setting will not remove dependencies that are already installed.
+
+      As of npm 12 the default is \`none\`. Tarballs that share a hostname
+      with the configured registry (the typical case for the npm registry,
+      GitHub Packages, and most private registries) are still installed
+      normally. If your registry serves tarballs from a different host,
+      set \`replace-registry-host\` or override this setting. Opt in
+      explicitly per project (in \`.npmrc\`) or per command (on the CLI)
+      when you intentionally install from a URL.
+
+      \`all\` allows any url to be installed.
+      \`none\` prevents any url from being installed.
+      \`root\` only allows urls defined in your project's package.json to be installed.  Also allows url dependencies to be used for other commands like \`npm view\`
+  `,
+    flatten,
+  }),
+  'allow-scripts': new Definition('allow-scripts', {
+    default: '',
+    type: [String, Array],
+    hint: '<package-list>',
+    description: `
+      Comma-separated list of packages whose install-time lifecycle scripts
+      (\`preinstall\`, \`install\`, \`postinstall\`, and \`prepare\` for
+      non-registry dependencies) are allowed to run.
+
+      This setting is intended for one-off and global contexts: \`npm exec\`,
+      \`npx\`, and \`npm install -g\`, where no project \`package.json\` is
+      involved. For team-wide policy in a project, use the \`allowScripts\`
+      field in \`package.json\` (which also supports explicit denials), or
+      configure it in \`.npmrc\`. Passing \`--allow-scripts\` on the command
+      line during a project-scoped \`npm install\`, \`ci\`, \`update\`, or
+      \`rebuild\` is an error.
+
+      Each name is matched against a dependency's resolved identity, not
+      against the package's self-reported name. \`--ignore-scripts\` and
+      \`--dangerously-allow-all-scripts\` both override this setting.
+  `,
+    flatten (key, obj, flatOptions) {
+      flatOptions.allowScripts = parseAllowScriptsList(obj[key])
+    },
   }),
   also: new Definition('also', {
     default: null,
@@ -230,17 +335,31 @@ const definitions = {
   }),
   before: new Definition('before', {
     default: null,
+    hint: '<date>',
     type: [null, Date],
     description: `
       If passed to \`npm install\`, will rebuild the npm tree such that only
-      versions that were available **on or before** the \`--before\` time get
-      installed.  If there's no versions available for the current set of
-      direct dependencies, the command will error.
+      versions that were available **on or before** the given date are
+      installed.  If there are no versions available for the current set of
+      dependencies, the command will error.
 
       If the requested version is a \`dist-tag\` and the given tag does not
       pass the \`--before\` filter, the most recent version less than or equal
       to that tag will be used. For example, \`foo@latest\` might install
       \`foo@1.2\` even though \`latest\` is \`2.0\`.
+
+      If \`before\` and \`min-release-age\` are both set in the same source,
+      \`before\` wins (an explicit absolute date overrides a relative window).
+      Across sources, the standard precedence applies (cli > env > project >
+      user > global), so a higher-priority source can always relax or
+      override a lower-priority one.
+
+      As with \`min-release-age\`, when this cutoff blocks a fix that
+      \`npm audit fix\` would install, npm keeps the vulnerable version, warns,
+      and exits with a non-zero code.
+
+      Packages whose names match \`min-release-age-exclude\` are exempt from
+      this filter.
     `,
     flatten,
   }),
@@ -260,7 +379,7 @@ const definitions = {
   browser: new Definition('browser', {
     default: null,
     defaultDescription: `
-    OS X: \`"open"\`, Windows: \`"start"\`, Others: \`"xdg-open"\`
+    macOS: \`"open"\`, Windows: \`"start"\`, Others: \`"xdg-open"\`
     `,
     type: [null, Boolean, String],
     description: `
@@ -270,6 +389,16 @@ const definitions = {
     terminal.
 
     Set to \`true\` to use default system URL opener.
+    `,
+    flatten,
+  }),
+  'bypass-2fa': new Definition('bypass-2fa', {
+    default: false,
+    type: Boolean,
+    description: `
+      When creating a Granular Access Token with \`npm token create\`,
+      setting this to true will allow the token to bypass two-factor
+      authentication. This is useful for automation and CI/CD workflows.
     `,
     flatten,
   }),
@@ -397,14 +526,14 @@ const definitions = {
       \`\`\`
 
       It is _not_ the path to a certificate file, though you can set a registry-scoped
-      "cafile" path like "//other-registry.tld/:cafile=/path/to/cert.pem".
+      "certfile" path like "//other-registry.tld/:certfile=/path/to/cert.pem".
     `,
     deprecated: `
       \`key\` and \`cert\` are no longer used for most registry operations.
-      Use registry scoped \`keyfile\` and \`cafile\` instead.
+      Use registry scoped \`keyfile\` and \`certfile\` instead.
       Example:
       //other-registry.tld/:keyfile=/path/to/key.pem
-      //other-registry.tld/:cafile=/path/to/cert.crt
+      //other-registry.tld/:certfile=/path/to/cert.crt
     `,
     flatten,
   }),
@@ -458,10 +587,22 @@ const definitions = {
     `,
     flatten,
   }),
+  'dangerously-allow-all-scripts': new Definition('dangerously-allow-all-scripts', {
+    default: false,
+    type: Boolean,
+    description: `
+      If \`true\`, bypass the \`allowScripts\` policy entirely and run every
+      dependency install script regardless of whether it was approved or
+      denied. Intended as a migration escape hatch only; its use is strongly
+      discouraged. \`--ignore-scripts\` still takes precedence over this
+      setting.
+    `,
+    flatten,
+  }),
   depth: new Definition('depth', {
     default: null,
     defaultDescription: `
-      \`Infinity\` if \`--all\` is set, otherwise \`0\`
+      \`Infinity\` if \`--all\` is set; otherwise, \`0\`
     `,
     type: [null, Number],
     description: `
@@ -623,6 +764,28 @@ const definitions = {
       Can be either true (expect some results) or false (expect no results).
     `,
   }),
+  expires: new Definition('expires', {
+    default: null,
+    type: [null, Number],
+    description: `
+      When creating a Granular Access Token with \`npm token create\`,
+      this sets the expiration in days. If not specified, the server
+      will determine the default expiration.
+    `,
+    flatten,
+  }),
+  'extension-file': new Definition('extension-file', {
+    default: null,
+    type: [null, path],
+    description: `
+      Path to a project-local npm extension file to load instead of
+      discovering \`.npm-extension.mjs\` / \`.npm-extension.cjs\` at the
+      project root. Must resolve inside the project root and use a \`.mjs\`
+      or \`.cjs\` extension. Only honored from project config or the command
+      line, never from user, global, or builtin config.
+    `,
+    flatten,
+  }),
   'fetch-retries': new Definition('fetch-retries', {
     default: 2,
     type: Number,
@@ -736,7 +899,7 @@ const definitions = {
     default: true,
     type: Boolean,
     description: `
-      Format \`package-lock.json\` or \`npm-shrinkwrap.json\` as a human
+      Format \`package-lock.json\` as a human
       readable file.
     `,
     flatten,
@@ -805,6 +968,29 @@ const definitions = {
     `,
     flatten,
   }),
+  // the global-ignore-file has its default defined outside of this module
+  'global-ignore-file': new Definition('global-ignore-file', {
+    type: path,
+    default: '',
+    defaultDescription: `
+      The global --prefix setting plus 'etc/npmignore'. For example,
+      '/usr/local/etc/npmignore'
+    `,
+    description: `
+      An additional ignore file applied during \`npm pack\` and \`npm
+      publish\`, owned by the current user rather than the package. Patterns
+      follow the same syntax as a package's local \`.npmignore\` file.
+      Useful for keeping editor metadata (such as \`.idea/\` or \`*.iml\`)
+      and scratch directories out of every package you publish, without
+      adding them to each package's own ignore rules.
+
+      The global rules apply in addition to a package's local \`.npmignore\`.
+      When a package uses a \`files\` field in its \`package.json\`, an entry
+      in \`files\` that contradicts a global rule (i.e., explicitly includes
+      a path the global rule would exclude) still wins.
+    `,
+    flatten,
+  }),
   'global-style': new Definition('global-style', {
     default: false,
     type: Boolean,
@@ -847,12 +1033,23 @@ const definitions = {
     type: Boolean,
     envExport: false,
     description: `
-      If true, npm will not exit with an error code when \`run-script\` is
+      If true, npm will not exit with an error code when \`run\` is
       invoked for a script that isn't defined in the \`scripts\` section of
       \`package.json\`. This option can be used when it's desirable to
       optionally run a script when it's present and fail if the script fails.
       This is useful, for example, when running scripts that may only apply for
       some builds in an otherwise generic CI setup.
+    `,
+    flatten,
+  }),
+  'ignore-extension': new Definition('ignore-extension', {
+    default: false,
+    type: Boolean,
+    description: `
+      If true, npm does not import or execute a root \`.npm-extension.mjs\` /
+      \`.npm-extension.cjs\` file (or one selected via \`extension-file\`).
+      \`ignore-scripts\` implies \`ignore-extension\`, since both disable
+      root-owned install-time code.
     `,
     flatten,
   }),
@@ -864,10 +1061,19 @@ const definitions = {
 
       Note that commands explicitly intended to run a particular script, such
       as \`npm start\`, \`npm stop\`, \`npm restart\`, \`npm test\`, and \`npm
-      run-script\` will still run their intended script if \`ignore-scripts\` is
+      run\` will still run their intended script if \`ignore-scripts\` is
       set, but they will *not* run any pre- or post-scripts.
+
+      Setting \`ignore-scripts\` also disables \`.npm-extension\` execution,
+      as if \`ignore-extension\` were set.
     `,
-    flatten,
+    // ignore-scripts implies ignore-extension: both disable root install-time code
+    flatten (key, obj, flatOptions) {
+      flatOptions.ignoreScripts = obj['ignore-scripts']
+      if (obj['ignore-scripts']) {
+        flatOptions.ignoreExtension = true
+      }
+    },
   }),
   include: new Definition('include', {
     default: [],
@@ -910,6 +1116,17 @@ const definitions = {
     `,
     flatten,
   }),
+  'include-attestations': new Definition('include-attestations', {
+    default: false,
+    type: Boolean,
+    description: `
+      When used with \`npm audit signatures --json\`, includes the full
+      sigstore attestation bundles in the JSON output for each verified
+      package. The bundles contain DSSE envelopes, verification material,
+      and transparency log entries.
+    `,
+    flatten,
+  }),
   'init-author-email': new Definition('init-author-email', {
     default: '',
     hint: '<email>',
@@ -936,11 +1153,12 @@ const definitions = {
     `,
   }),
   'init-license': new Definition('init-license', {
-    default: 'ISC',
+    default: '',
     hint: '<license>',
     type: String,
     description: `
       The value \`npm init\` should use by default for the package license.
+      If not set, the license field will be omitted from new packages.
     `,
   }),
   'init-module': new Definition('init-module', {
@@ -970,6 +1188,14 @@ const definitions = {
       The value that \`npm init\` should use by default for the package
       version number, if not already set in package.json.
     `,
+  }),
+  'init-private': new Definition('init-private', {
+    default: false,
+    type: Boolean,
+    description: `
+      The value \`npm init\` should use by default for the package's private flag.
+    `,
+    flatten,
   }),
   // these "aliases" are historically supported in .npmrc files, unfortunately
   // They should be removed in a future npm version.
@@ -1003,7 +1229,7 @@ const definitions = {
     `,
   }),
   'init.license': new Definition('init.license', {
-    default: 'ISC',
+    default: '',
     type: String,
     deprecated: `
       Use \`--init-license\` instead.
@@ -1051,8 +1277,15 @@ const definitions = {
         necessary within directory structure.
       nested: (formerly --legacy-bundling) install in place, no hoisting.
       shallow (formerly --global-style) only install direct deps at top-level.
-      linked: (experimental) install in node_modules/.store, link in place,
-        unhoisted.
+      linked: install in node_modules/.store, link in place, unhoisted.
+
+      We recommend that package authors use \`--install-strategy=linked\`
+      during development to catch undeclared ("phantom") dependencies before
+      publishing: the isolated layout only exposes a package's declared
+      dependencies, so an \`import\` of a package that was never added to
+      \`package.json\` can fail instead of resolving by accident and shipping
+      broken. See [Catching undeclared ("phantom")
+      dependencies](/using-npm/developers#catching-undeclared-phantom-dependencies).
     `,
     flatten,
   }),
@@ -1085,10 +1318,10 @@ const definitions = {
     `,
     deprecated: `
       \`key\` and \`cert\` are no longer used for most registry operations.
-      Use registry scoped \`keyfile\` and \`cafile\` instead.
+      Use registry scoped \`keyfile\` and \`certfile\` instead.
       Example:
       //other-registry.tld/:keyfile=/path/to/key.pem
-      //other-registry.tld/:cafile=/path/to/cert.crt
+      //other-registry.tld/:certfile=/path/to/cert.crt
     `,
     flatten,
   }),
@@ -1196,11 +1429,11 @@ const definitions = {
     default: null,
     type: [null, 1, 2, 3, '1', '2', '3'],
     defaultDescription: `
-      Version 3 if no lockfile, auto-converting v1 lockfiles to v3, otherwise
+      Version 3 if no lockfile, auto-converting v1 lockfiles to v3; otherwise,
       maintain current lockfile version.`,
     description: `
-      Set the lockfile format version to be used in package-lock.json and
-      npm-shrinkwrap-json files.  Possible options are:
+      Set the lockfile format version to be used in package-lock.json files.
+      Possible options are:
 
       1: The lockfile version used by npm versions 5 and 6.  Lacks some data that
       is used during the install, resulting in slower and possibly less
@@ -1272,6 +1505,16 @@ const definitions = {
       Show extended information in \`ls\`, \`search\`, and \`help-search\`.
     `,
   }),
+  name: new Definition('name', {
+    default: null,
+    type: [null, String],
+    hint: '<name>',
+    description: `
+      When creating a Granular Access Token with \`npm token create\`,
+      this sets the name/description for the token.
+    `,
+    flatten,
+  }),
   maxsockets: new Definition('maxsockets', {
     default: 15,
     type: Number,
@@ -1294,8 +1537,89 @@ const definitions = {
     `,
     flatten,
   }),
+  'min-release-age': new Definition('min-release-age', {
+    default: null,
+    hint: '<days>',
+    type: [null, Number],
+    envExport: false,
+    description: `
+       If set, npm will build the npm tree such that only versions that were
+       available more than the given number of days ago will be installed.  If
+       there are no versions available for the current set of dependencies, the
+       command will error.
+
+       This flag is a complement to \`before\`, which accepts an exact date
+       instead of a relative number of days. The two may coexist (e.g.
+       \`min-release-age\` in your \`.npmrc\` is preserved when npm internally
+       spawns a sub-process with \`--before\` while preparing a \`git:\` or
+       \`github:\` dependency); when both apply, \`before\` wins within a
+       single source and across sources the standard precedence rules apply.
+
+       When this window stops \`npm audit fix\` from installing a patched
+       version (because the fix was published too recently), npm keeps the
+       package at its vulnerable version, warns that the fix was blocked, and
+       exits with a non-zero code. To install the fix, add the package to
+       \`min-release-age-exclude\`, or relax \`min-release-age\` or \`before\`.
+
+       Packages whose names match \`min-release-age-exclude\` are exempt from
+       this filter.
+    `,
+    flatten: (key, obj, flatOptions) => {
+      const age = obj['min-release-age']
+      // `hasOwn` so a `before` inherited via ConfigData's prototype chain (lib/index.js) from a lower-priority source doesn't silently win.
+      // The `: null` clear depends on `Config#flat` iterating sources low → high.
+      if (age != null && !Object.hasOwn(obj, 'before')) {
+        flatOptions.before = age ? new Date(Date.now() - (86400000 * age)) : null
+      }
+    },
+  }),
+  'min-release-age-exclude': new Definition('min-release-age-exclude', {
+    default: [],
+    hint: '<pkg|glob>',
+    type: [Array, String],
+    envExport: false,
+    description: `
+       A list of package names or \`minimatch\` glob patterns that are exempt
+       from the \`min-release-age\` (and \`before\`) filter. A matching package
+       can always resolve to its newest version, even when a release-age window
+       is set.
+
+       For example, to apply a release-age window to third-party dependencies
+       while letting internally maintained packages update immediately:
+
+       \`\`\`
+       min-release-age=7
+       min-release-age-exclude[]=@myorg/*
+       min-release-age-exclude[]=my-internal-pkg
+       \`\`\`
+
+       Only the named package is exempt; its own dependencies still follow the
+       release-age policy unless they also match a pattern. Patterns match
+       against the package name, so \`@myorg/*\` matches \`@myorg/shared-utils\`.
+
+       Excluding a package does not change which registry it is fetched from. You
+       should own your private scope on the public registry so that nobody else
+       can publish a package with the same name.
+    `,
+    flatten: (key, obj, flatOptions) => {
+      // The config layer always resolves this to an array (nopt and .npmrc both
+      // coerce `[Array, String]` to a list, default `[]`), so treat it as one.
+      // A single value may still pack multiple names as a comma string.
+      const list = obj[key]
+        .flatMap(v => String(v).split(','))
+        .map(v => v.trim())
+        .filter(Boolean)
+      flatOptions.minReleaseAgeExclude = [...new Set(list)]
+    },
+  }),
   'node-gyp': new Definition('node-gyp', {
-    default: require.resolve('node-gyp/bin/node-gyp.js'),
+    default: (() => {
+      try {
+        return require.resolve('node-gyp/bin/node-gyp.js')
+      } catch {
+        return ''
+      }
+    })(),
     defaultDescription: `
       The path to the node-gyp bin that ships with npm
     `,
@@ -1347,15 +1671,15 @@ const definitions = {
   omit: new Definition('omit', {
     default: process.env.NODE_ENV === 'production' ? ['dev'] : [],
     defaultDescription: `
-      'dev' if the \`NODE_ENV\` environment variable is set to 'production',
-      otherwise empty.
+      'dev' if the \`NODE_ENV\` environment variable is set to 'production';
+      otherwise, empty.
     `,
     type: [Array, 'dev', 'optional', 'peer'],
     description: `
       Dependency types to omit from the installation tree on disk.
 
       Note that these dependencies _are_ still resolved and added to the
-      \`package-lock.json\` or \`npm-shrinkwrap.json\` file.  They are just
+      \`package-lock.json\` file.  They are just
       not physically installed on disk.
 
       If a package type appears in both the \`--include\` and \`--omit\`
@@ -1393,6 +1717,15 @@ const definitions = {
     flatten (key, obj, flatOptions) {
       definitions.omit.flatten('omit', obj, flatOptions)
     },
+  }),
+  orgs: new Definition('orgs', {
+    default: null,
+    type: [null, String, Array],
+    description: `
+      When creating a Granular Access Token with \`npm token create\`,
+      this limits the token access to specific organizations.
+    `,
+    flatten,
   }),
   optional: new Definition('optional', {
     default: null,
@@ -1490,6 +1823,72 @@ const definitions = {
     `,
     flatten,
   }),
+  packages: new Definition('packages', {
+    default: [],
+    type: [null, String, Array],
+    description: `
+      When creating a Granular Access Token with \`npm token create\`,
+      this limits the token access to specific packages.
+    `,
+    flatten,
+  }),
+  'patches-dir': new Definition('patches-dir', {
+    default: 'patches',
+    type: String,
+    description: `
+      The directory, relative to the project root, where \`npm patch commit\`
+      writes patch files for \`patchedDependencies\`.
+    `,
+    flatten,
+  }),
+  // CLI-only: deliberately no flatten, so a value in .npmrc/env never reaches the install pipeline.
+  // npm install reads it from the cli layer only, and npm ci rejects it.
+  'allow-unused-patches': new Definition('allow-unused-patches', {
+    default: false,
+    type: Boolean,
+    description: `
+      Install even when a registered patch in \`patchedDependencies\` matches no
+      installed package. Does not silence patch apply failures.
+
+      This flag is only honored when passed on the command line; it is ignored
+      in \`.npmrc\` and environment variables, and rejected by \`npm ci\`.
+    `,
+  }),
+  'ignore-patch-failures': new Definition('ignore-patch-failures', {
+    default: false,
+    type: Boolean,
+    description: `
+      Install even when a registered patch fails to apply, with a warning per
+      failure. Intended for incident response only.
+
+      This flag is only honored when passed on the command line; it is ignored
+      in \`.npmrc\` and environment variables, and rejected by \`npm ci\`.
+    `,
+  }),
+  'edit-dir': new Definition('edit-dir', {
+    default: null,
+    type: [null, path],
+    description: `
+      Override the temporary directory used by \`npm patch add\` to prepare a
+      package for editing.
+    `,
+  }),
+  'ignore-existing': new Definition('ignore-existing', {
+    default: false,
+    type: Boolean,
+    description: `
+      With \`npm patch add\`, discard a previous unfinished edit directory and
+      start fresh.
+    `,
+  }),
+  'keep-edit-dir': new Definition('keep-edit-dir', {
+    default: false,
+    type: Boolean,
+    description: `
+      With \`npm patch commit\`, do not remove the edit directory after
+      committing the patch.
+    `,
+  }),
   parseable: new Definition('parseable', {
     default: false,
     type: Boolean,
@@ -1497,6 +1896,27 @@ const definitions = {
     description: `
       Output parseable results from commands that write to standard output. For
       \`npm search\`, this will be tab-separated table format.
+    `,
+    flatten,
+  }),
+  'allow-scripts-pending': new Definition('allow-scripts-pending', {
+    default: false,
+    type: Boolean,
+    description: `
+      List packages with install scripts that are not yet covered by the
+      \`allowScripts\` policy, without modifying \`package.json\`. Only
+      meaningful for \`npm approve-scripts\`.
+    `,
+    flatten,
+  }),
+  'allow-scripts-pin': new Definition('allow-scripts-pin', {
+    default: true,
+    type: Boolean,
+    description: `
+      Write pinned (\`pkg@version\`) entries when approving install scripts.
+      Set to \`false\` to write name-only entries that allow any version.
+      Has no effect on \`npm deny-scripts\`, which always writes name-only
+      entries regardless of this setting.
     `,
     flatten,
   }),
@@ -1563,9 +1983,9 @@ const definitions = {
     },
   }),
   progress: new Definition('progress', {
-    default: !ciInfo.isCI,
+    default: !(ciInfo.isCI || !process.stderr.isTTY || !process.stdout.isTTY || process.env.TERM === 'dumb'),
     defaultDescription: `
-      \`true\` unless running in a known CI system
+      \`true\` when not in CI and both stderr and stdout are TTYs and not in a dumb terminal
     `,
     type: Boolean,
     description: `
@@ -1575,11 +1995,8 @@ const definitions = {
       Set to \`false\` to suppress the progress bar.
     `,
     flatten (key, obj, flatOptions) {
-      flatOptions.progress = !obj.progress ? false
-        // progress is only written to stderr but we disable it unless stdout is a tty
-        // also. This prevents the progress from appearing when piping output to another
-        // command which doesn't break anything, but does look very odd to users.
-        : !!process.stderr.isTTY && !!process.stdout.isTTY && process.env.TERM !== 'dumb'
+      // Only show progress if explicitly enabled AND we have proper TTY environment
+      flatOptions.progress = !!obj.progress && !!process.stderr.isTTY && !!process.stdout.isTTY && process.env.TERM !== 'dumb'
     },
   }),
   provenance: new Definition('provenance', {
@@ -1639,7 +2056,7 @@ const definitions = {
   }),
   'replace-registry-host': new Definition('replace-registry-host', {
     default: 'npmjs',
-    hint: '<npmjs|never|always> | hostname',
+    hint: '<npmjs|never|always> | hostname | url',
     type: ['npmjs', 'never', 'always', String],
     description: `
       Defines behavior for replacing the registry host in a lockfile with the
@@ -1650,7 +2067,14 @@ const definitions = {
       "never", then use the registry value. If set to "always", then replace the
       registry host with the configured host every time.
 
-      You may also specify a bare hostname (e.g., "registry.npmjs.org").
+      You may also specify a bare hostname (e.g., "registry.npmjs.org") to only
+      replace URLs coming from that host.
+
+      You may also specify a full URL including a path (e.g.,
+      "https://old-registry.example.com/npm/path"). In that case, resolved URLs
+      whose host and path begin with that prefix will have the entire prefix
+      replaced with the configured registry URL (host and path), without
+      duplicating path segments.
     `,
     flatten,
   }),
@@ -1695,6 +2119,7 @@ const definitions = {
     default: false,
     type: Boolean,
     short: 'D',
+    exclusive: ['save-optional', 'save-peer', 'save-prod'],
     description: `
       Save installed packages to a package.json file as \`devDependencies\`.
     `,
@@ -1726,6 +2151,7 @@ const definitions = {
     default: false,
     type: Boolean,
     short: 'O',
+    exclusive: ['save-dev', 'save-peer', 'save-prod'],
     description: `
       Save installed packages to a package.json file as
       \`optionalDependencies\`.
@@ -1754,6 +2180,7 @@ const definitions = {
   'save-peer': new Definition('save-peer', {
     default: false,
     type: Boolean,
+    exclusive: ['save-dev', 'save-optional', 'save-prod'],
     description: `
       Save installed packages to a package.json file as \`peerDependencies\`
     `,
@@ -1799,6 +2226,7 @@ const definitions = {
     default: false,
     type: Boolean,
     short: 'P',
+    exclusive: ['save-dev', 'save-optional', 'save-peer'],
     description: `
       Save installed packages into \`dependencies\` specifically. This is
       useful if a package already exists in \`devDependencies\` or
@@ -1884,6 +2312,63 @@ const definitions = {
       flatOptions.projectScope = scope
     },
   }),
+  scopes: new Definition('scopes', {
+    default: null,
+    type: [null, String, Array],
+    description: `
+      When creating a Granular Access Token with \`npm token create\`,
+      this limits the token access to specific scopes. Provide
+      a scope name (with or without @ prefix).
+    `,
+    flatten,
+  }),
+  'packages-all': new Definition('packages-all', {
+    default: false,
+    type: Boolean,
+    description: `
+      When creating a Granular Access Token with \`npm token create\`,
+      grants the token access to all packages instead of limiting to
+      specific packages.
+    `,
+    flatten,
+  }),
+  'packages-and-scopes-permission': new Definition('packages-and-scopes-permission', {
+    default: null,
+    type: [null, 'read-only', 'read-write', 'no-access'],
+    description: `
+      When creating a Granular Access Token with \`npm token create\`,
+      sets the permission level for packages and scopes. Options are
+      "read-only", "read-write", or "no-access".
+    `,
+    flatten,
+  }),
+  'orgs-permission': new Definition('orgs-permission', {
+    default: null,
+    type: [null, 'read-only', 'read-write', 'no-access'],
+    description: `
+      When creating a Granular Access Token with \`npm token create\`,
+      sets the permission level for organizations. Options are
+      "read-only", "read-write", or "no-access".
+    `,
+    flatten,
+  }),
+  password: new Definition('password', {
+    default: null,
+    type: [null, String],
+    description: `
+      Password for authentication. Can be provided via command line when
+      creating tokens, though it's generally safer to be prompted for it.
+    `,
+    flatten,
+  }),
+  'token-description': new Definition('token-description', {
+    default: null,
+    type: [null, String],
+    description: `
+      Description text for the token when using \`npm token create\`.
+    `,
+    flatten,
+  }),
   'script-shell': new Definition('script-shell', {
     default: null,
     defaultDescription: `
@@ -1955,20 +2440,6 @@ const definitions = {
     `,
     flatten,
   }),
-  shrinkwrap: new Definition('shrinkwrap', {
-    default: true,
-    type: Boolean,
-    deprecated: `
-      Use the --package-lock setting instead.
-    `,
-    description: `
-      Alias for --package-lock
-    `,
-    flatten (key, obj, flatOptions) {
-      obj['package-lock'] = obj.shrinkwrap
-      definitions['package-lock'].flatten('package-lock', obj, flatOptions)
-    },
-  }),
   'sign-git-commit': new Definition('sign-git-commit', {
     default: false,
     type: Boolean,
@@ -2013,6 +2484,27 @@ const definitions = {
     `,
     flatten,
   }),
+  'strict-allow-scripts': new Definition('strict-allow-scripts', {
+    default: false,
+    type: Boolean,
+    description: `
+      If \`true\`, turn the install-script policy from a warning into a hard
+      error: any dependency with install scripts that is not covered by
+      \`allowScripts\` will fail the install instead of being blocked with a
+      warning.
+
+      Dependencies explicitly denied with \`false\` in \`allowScripts\` are
+      always silently skipped; this setting only affects unreviewed entries
+      (packages with install scripts that are neither approved nor denied).
+      \`--ignore-scripts\` and \`--dangerously-allow-all-scripts\` both
+      override this setting.
+
+      Optional dependencies that cannot be installed on the current platform
+      or engine (a non-matching \`os\`, \`cpu\`, or \`libc\`) are not flagged,
+      because their install scripts never run.
+    `,
+    flatten,
+  }),
   'strict-ssl': new Definition('strict-ssl', {
     default: true,
     type: Boolean,
@@ -2033,13 +2525,13 @@ const definitions = {
       If you ask npm to install a package and don't tell it a specific version,
       then it will install the specified tag.
 
-      It is the tag added to the package@version specified in the 
+      It is the tag added to the package@version specified in the
       \`npm dist-tag add\` command, if no explicit tag is given.
 
       When used by the \`npm diff\` command, this is the tag used to fetch the
       tarball that will be compared with the local files by default.
-      
-      If used in the \`npm publish\` command, this is the tag that will be 
+
+      If used in the \`npm publish\` command, this is the tag that will be
       added to the package submitted to the registry.
     `,
     flatten (key, obj, flatOptions) {
@@ -2072,6 +2564,16 @@ const definitions = {
 
       Timing information will also be reported in the terminal. To suppress this
       while still writing the timing file, use \`--silent\`.
+    `,
+  }),
+  to: new Definition('to', {
+    default: null,
+    hint: '<version>',
+    type: [null, String],
+    description: `
+      Used by \`npm patch update\` to set the version to rebase a patch onto
+      when it cannot be read from \`package-lock.json\` — for example an
+      exact-version selector, or a version that has not been installed yet.
     `,
   }),
   umask: new Definition('umask', {
@@ -2148,6 +2650,36 @@ const definitions = {
     flatten (key, obj, flatOptions) {
       const value = obj[key]
       const ciName = ciInfo.name?.toLowerCase().split(' ').join('-') || null
+      // A more specific sub-category for the detected CI, appended to the
+      // ci token as `ci/{ci-name}/{sub-ci-name}` when present.
+      let subCiName = null
+      if (ciInfo.GITHUB_ACTIONS) {
+        // Env vars can be absent, empty, or whitespace; normalize before use.
+        const serverUrl = (process.env.GITHUB_SERVER_URL || '').trim()
+        const runnerEnv = (process.env.RUNNER_ENVIRONMENT || '').trim()
+        let serverHost = ''
+        try {
+          serverHost = new URL(serverUrl).hostname.toLowerCase()
+        } catch {
+          serverHost = ''
+        }
+        if (serverHost === 'github.com') {
+          if (runnerEnv === 'github-hosted') {
+            subCiName = 'dotcom-hosted'
+          } else if (runnerEnv === 'self-hosted') {
+            subCiName = 'dotcom-selfhosted'
+          } else {
+            subCiName = 'dotcom'
+          }
+        } else if (serverHost === 'ghe.com' || serverHost.endsWith('.ghe.com')) {
+          subCiName = 'ghecom'
+        } else if (serverHost) {
+          subCiName = 'ghes'
+        }
+      }
+      const ci = ciName
+        ? `ci/${ciName}${subCiName ? `/${subCiName}` : ''}`
+        : ''
       let inWorkspaces = false
       if (obj.workspaces || obj.workspace && obj.workspace.length) {
         inWorkspaces = true
@@ -2158,7 +2690,7 @@ const definitions = {
           .replace(/\{platform\}/gi, process.platform)
           .replace(/\{arch\}/gi, process.arch)
           .replace(/\{workspaces\}/gi, inWorkspaces)
-          .replace(/\{ci\}/gi, ciName ? `ci/${ciName}` : '')
+          .replace(/\{ci\}/gi, ci)
           .trim()
 
       // We can't clobber the original or else subsequent flattening will fail

@@ -79,10 +79,61 @@ const packument = (nv, opts) => {
         },
       },
     },
+    // package with no time attribute
+    gray: {
+      _id: 'gray',
+      name: 'gray',
+      'dist-tags': {
+        latest: '1.1.0',
+        beta: '1.2.0-beta',
+        alpha: '1.2.0-alpha',
+        old: '1.0.0',
+        stable: '1.1.0',
+      },
+      versions: {
+        '1.1.0': {
+          name: 'gray',
+          version: '1.1.0',
+          dist: {
+            shasum: 'b',
+            tarball: 'http://gray/1.1.0.tgz',
+            fileCount: 1,
+          },
+        },
+      },
+    },
     cyan: {
       _npmUser: {
         name: 'claudia',
         email: 'claudia@cyan.com',
+      },
+      name: 'cyan',
+      'dist-tags': {
+        latest: '1.0.0',
+      },
+      versions: {
+        '1.0.0': {
+          version: '1.0.0',
+          name: 'cyan',
+          dist: {
+            shasum: '123',
+            tarball: 'http://hm.cyan.com/1.0.0.tgz',
+            integrity: '---',
+            fileCount: 1,
+            unpackedSize: 1000000,
+          },
+        },
+        '1.0.1': {},
+      },
+    },
+    'cyan-oidc': {
+      _npmUser: {
+        name: 'claudia',
+        email: 'claudia@cyan.com',
+        trustedPublisher: {
+          id: 'github',
+          oidcConfigId: 'oidc:a0e127d0-8d66-45d0-8264-e4f8372c7249',
+        },
       },
       name: 'cyan',
       'dist-tags': {
@@ -327,7 +378,7 @@ const packument = (nv, opts) => {
 }
 
 const loadMockNpm = async function (t, opts = {}) {
-  const mockNpm = await _loadMockNpm(t, {
+  return _loadMockNpm(t, {
     command: 'view',
     mocks: {
       pacote: {
@@ -340,11 +391,12 @@ const loadMockNpm = async function (t, opts = {}) {
       ...opts.config,
     },
   })
-  return mockNpm
 }
 
 t.test('package from git', async t => {
-  const { view, joinedOutput } = await loadMockNpm(t, { config: { unicode: false } })
+  const { view, joinedOutput } = await loadMockNpm(t, {
+    config: { unicode: false, 'allow-git': 'all' },
+  })
   await view.exec(['https://github.com/npm/green'])
   t.matchSnapshot(joinedOutput())
 })
@@ -415,6 +467,35 @@ t.test('package with --json and semver range', async t => {
   t.matchSnapshot(joinedOutput())
 })
 
+t.test('package with --json and single-match semver range preserves array output', async t => {
+  const { view, joinedOutput } = await loadMockNpm(t, { config: { json: true } })
+  await view.exec(['single-version@^1'])
+  const parsed = JSON.parse(joinedOutput())
+  t.ok(Array.isArray(parsed), 'preserves the top-level array for semver ranges')
+  t.equal(parsed.length, 1, 'returns the single matching version in an array')
+  t.match(parsed[0], {
+    name: 'single-version',
+    version: '1.0.0',
+    dist: {
+      shasum: '123',
+      tarball: 'http://hm.single-version.com/1.0.0.tgz',
+      fileCount: 1,
+    },
+  }, 'returns the expected package data')
+})
+
+t.test('package field with --json and single-match semver range preserves array output', async t => {
+  const { view, joinedOutput } = await loadMockNpm(t, { config: { json: true } })
+  await view.exec(['single-version@^1', 'version'])
+  t.strictSame(JSON.parse(joinedOutput()), ['1.0.0'], 'does not unwrap single field matches for semver ranges')
+})
+
+t.test('package with _npmUser.trustedPublisher shows cleaned up property with --json', async t => {
+  const { view, joinedOutput } = await loadMockNpm(t, { config: { json: true } })
+  await view.exec(['cyan-oidc@^1.0.0'])
+  t.match(joinedOutput(), /claudia <claudia@cyan.com>/, 'uses oidc trustedPublisher info for _npmUser')
+})
+
 t.test('package with --json and no versions', async t => {
   const { view, joinedOutput } = await loadMockNpm(t, { config: { json: true } })
   await view.exec(['brown'])
@@ -424,7 +505,7 @@ t.test('package with --json and no versions', async t => {
 t.test('package with --json and single string arg', async t => {
   const { view, joinedOutput } = await loadMockNpm(t, { config: { json: true } })
   await view.exec(['blue', 'dist-tags.latest'])
-  t.equal(JSON.parse(joinedOutput()), '1.0.0', 'no info to display')
+  t.strictSame(JSON.parse(joinedOutput()), ['1.0.0'], 'returns single string value as array')
 })
 
 t.test('package with single version', async t => {
@@ -438,7 +519,7 @@ t.test('package with single version', async t => {
     const { view, joinedOutput } = await loadMockNpm(t, { config: { json: true } })
     await view.exec(['single-version', 'versions'])
     const parsed = JSON.parse(joinedOutput())
-    t.strictSame(parsed, ['1.0.0'], 'does not unwrap single item arrays in json')
+    t.strictSame(parsed, [['1.0.0']], 'does not unwrap single item arrays in json')
   })
 
   t.test('no json and versions arg', async t => {
@@ -768,4 +849,19 @@ t.test('no package completion', async t => {
   const res = await view.completion({ conf: { argv: { remain: ['npm', 'view'] } } })
   t.notOk(res, 'there is no package completion')
   t.end()
+})
+
+t.test('allow-git=root, package with multiple dist‑tags and no time', async t => {
+  const { view, joinedOutput } = await loadMockNpm(t, { config: { unicode: false, 'allow-git': 'root' } })
+  await view.exec(['https://github.com/npm/gray'])
+  t.matchSnapshot(joinedOutput())
+})
+
+t.test('allow-git=none', async t => {
+  const { view } = await loadMockNpm(t, { config: { 'allow-git': 'none' }, mocks: {} })
+  await t.rejects(view.exec(['npm/npm']), {
+    code: 'EALLOWGIT',
+    package: 'github:npm/npm',
+    message: 'Fetching packages of type "git" have been disabled',
+  })
 })
