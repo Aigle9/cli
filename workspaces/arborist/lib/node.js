@@ -28,22 +28,28 @@
 // where we need to quickly find all instances of a given package name within a
 // tree.
 
-const semver = require('semver')
+const PackageJson = require('@npmcli/package-json')
 const nameFromFolder = require('@npmcli/name-from-folder')
+const npa = require('npm-package-arg')
+const semver = require('semver')
+const util = require('node:util')
+const { getPaths: getBinPaths } = require('bin-links')
+const { log } = require('proc-log')
+const { resolve, relative, dirname, basename } = require('node:path')
+const { walkUp } = require('walk-up-path')
+
+const CaseInsensitiveMap = require('./case-insensitive-map.js')
 const Edge = require('./edge.js')
 const Inventory = require('./inventory.js')
 const OverrideSet = require('./override-set.js')
-const { normalize } = require('read-package-json-fast')
-const { getPaths: getBinPaths } = require('bin-links')
-const npa = require('npm-package-arg')
+const consistentResolve = require('./consistent-resolve.js')
 const debug = require('./debug.js')
 const gatherDepSet = require('./gather-dep-set.js')
+const printableTree = require('./printable.js')
+const querySelectorAll = require('./query-selector-all.js')
+const relpath = require('./relpath.js')
 const treeCheck = require('./tree-check.js')
-const { walkUp } = require('walk-up-path')
-const { log } = require('proc-log')
 
-const { resolve, relative, dirname, basename } = require('node:path')
-const util = require('node:util')
 const _package = Symbol('_package')
 const _parent = Symbol('_parent')
 const _target = Symbol.for('_target')
@@ -58,14 +64,6 @@ const _delistFromMeta = Symbol.for('_delistFromMeta')
 const _explain = Symbol('_explain')
 const _explanation = Symbol('_explanation')
 
-const relpath = require('./relpath.js')
-const consistentResolve = require('./consistent-resolve.js')
-
-const printableTree = require('./printable.js')
-const CaseInsensitiveMap = require('./case-insensitive-map.js')
-
-const querySelectorAll = require('./query-selector-all.js')
-
 class Node {
   #global
   #meta
@@ -75,33 +73,35 @@ class Node {
   constructor (options) {
     // NB: path can be null if it's a link target
     const {
-      root,
-      path,
-      realpath,
-      parent,
-      error,
-      meta,
-      fsParent,
-      resolved,
-      integrity,
-      // allow setting name explicitly when we haven't set a path yet
-      name,
       children,
+      dev = true,
+      devOptional = true,
+      dummy = false,
+      error,
+      extraneous = true,
       fsChildren,
+      fsParent,
+      global = false,
+      inert = false,
       installLinks = false,
+      integrity,
+      isInStore = false,
       legacyPeerDeps = false,
       linksIn,
-      isInStore = false,
-      hasShrinkwrap,
-      overrides,
       loadOverrides = false,
-      extraneous = true,
-      dev = true,
+      meta,
+      name, // allow setting name explicitly when we haven't set a path yet
       optional = true,
-      devOptional = true,
+      overrides,
+      packageExtensionsApplied = null,
+      npmExtensionApplied = null,
+      parent,
+      patched = null,
+      path,
       peer = true,
-      global = false,
-      dummy = false,
+      realpath,
+      resolved,
+      root,
       sourceReference = null,
     } = options
     // this object gives querySelectorAll somewhere to stash context about a node
@@ -120,14 +120,25 @@ class Node {
     // package's dependencies in a virtual root.
     this.sourceReference = sourceReference
 
-    // TODO if this came from pacote.manifest we don't have to do this,
-    // we can be told to skip this step
-    const pkg = sourceReference ? sourceReference.package
-      : normalize(options.pkg || {})
+    // have to set the internal package ref before assigning the parent, because this.package is read when adding to inventory
+    if (sourceReference) {
+      this[_package] = sourceReference.package
+    } else {
+      // TODO if this came from pacote.manifest we don't have to do this, we can be told to skip this step
+      const pkg = new PackageJson()
+      let content = {}
+      // TODO this is overly guarded.  If pkg is not an object we should not allow it at all.
+      if (options.pkg && typeof options.pkg === 'object') {
+        content = options.pkg
+      }
+      pkg.fromContent(content)
+      pkg.syncNormalize()
+      this[_package] = pkg.content
+    }
 
     this.name = name ||
-      nameFromFolder(path || pkg.name || realpath) ||
-      pkg.name ||
+      nameFromFolder(path || this.package.name || realpath) ||
+      this.package.name ||
       null
 
     // should be equal if not a link
@@ -155,13 +166,20 @@ class Node {
       // probably what we're getting from pacote, which IS trustworthy.
       //
       // Otherwise, hopefully a shrinkwrap will help us out.
-      const resolved = consistentResolve(pkg._resolved)
-      if (resolved && !(/^file:/.test(resolved) && pkg._where)) {
+      const resolved = consistentResolve(this.package._resolved)
+      if (resolved && !(/^file:/.test(resolved) && this.package._where)) {
         this.resolved = resolved
       }
     }
-    this.integrity = integrity || pkg._integrity || null
-    this.hasShrinkwrap = hasShrinkwrap || pkg._hasShrinkwrap || false
+    this.integrity = integrity || this.package._integrity || null
+    // Patch record { path, integrity } or null, set from patchedDependencies or the lockfile.
+    this.patched = patched || null
+    // Provenance for a root packageExtensions repair applied to this node's manifest, or null.
+    // Shape: { selector, dependencies?, optionalDependencies?, peerDependencies?, peerDependenciesMeta? }.
+    this.packageExtensionsApplied = packageExtensionsApplied
+    // Provenance for a root .npm-extension transformManifest repair applied to this node's manifest, or null.
+    // Shape: { extensionPoint, dependencies?, optionalDependencies?, peerDependencies?, peerDependenciesMeta? }.
+    this.npmExtensionApplied = npmExtensionApplied
     this.installLinks = installLinks
     this.legacyPeerDeps = legacyPeerDeps
 
@@ -197,20 +215,18 @@ class Node {
       this.extraneous = false
     }
 
+    this.inert = inert
+
     this.edgesIn = new Set()
     this.edgesOut = new CaseInsensitiveMap()
-
-    // have to set the internal package ref before assigning the parent,
-    // because this.package is read when adding to inventory
-    this[_package] = pkg && typeof pkg === 'object' ? pkg : {}
 
     if (overrides) {
       this.overrides = overrides
     } else if (loadOverrides) {
-      const overrides = this[_package].overrides || {}
+      const overrides = this.package.overrides || {}
       if (Object.keys(overrides).length > 0) {
         this.overrides = new OverrideSet({
-          overrides: this[_package].overrides,
+          overrides: this.package.overrides,
         })
       }
     }
@@ -240,7 +256,7 @@ class Node {
     this.fsParent = fsParent || null
 
     // see parent/root setters below.
-    // root is set to parent's root if we have a parent, otherwise if it's
+    // root is set to parent's root if we have a parent; otherwise, if it's
     // null, then it's set to the node itself.
     if (!parent && !fsParent) {
       this.root = root || null
@@ -311,7 +327,7 @@ class Node {
     }
 
     return getBinPaths({
-      pkg: this[_package],
+      pkg: this.package,
       path: this.path,
       global: this.global,
       top: this.globalTop,
@@ -325,11 +341,11 @@ class Node {
   }
 
   get version () {
-    return this[_package].version || ''
+    return this.package.version || ''
   }
 
   get packageName () {
-    return this[_package].name || null
+    return this.package.name || null
   }
 
   get pkgid () {
@@ -486,6 +502,27 @@ class Node {
     return false
   }
 
+  shouldOmit (omitSet) {
+    if (!omitSet.size) {
+      return false
+    }
+
+    const { top } = this
+
+    // if the top is not the root or workspace then we do not want to omit it
+    if (!top.isProjectRoot && !top.isWorkspace) {
+      return false
+    }
+
+    // omit node if the dep type matches any omit flags that were set
+    return (
+      this.peer && omitSet.has('peer') ||
+      this.dev && omitSet.has('dev') ||
+      this.optional && omitSet.has('optional') ||
+      this.devOptional && omitSet.has('optional') && omitSet.has('dev')
+    )
+  }
+
   getBundler (path = []) {
     // made a cycle, definitely not bundled!
     if (path.includes(this)) {
@@ -555,9 +592,7 @@ class Node {
   }
 
   get isProjectRoot () {
-    // only treat as project root if it's the actual link that is the root,
-    // or the target of the root link, but NOT if it's another link to the
-    // same root that happens to be somewhere else.
+    // only treat as project root if it's the actual link that is the root, or the target of the root link, but NOT if it's another link to the same root that happens to be somewhere else.
     return this === this.root || this === this.root.target
   }
 
@@ -803,7 +838,7 @@ class Node {
         edge.reload()
       }
     }
-    // reload all edgesOut where root doens't match, or is missing, since
+    // reload all edgesOut where root doesn't match, or is missing, since
     // it might not be missing in the new tree
     for (const edge of this.edgesOut.values()) {
       if (!edge.to || edge.to.root !== root) {
@@ -901,7 +936,8 @@ class Node {
       isTop: srcTop,
       path: srcPath,
     } = sourceReference || {}
-    const thisDev = isTop && !globalTop && path
+    // A package in the linked strategy's .store is a transitive dependency that is structurally a tree top, but its devDependencies are never installed or required, so they must not be loaded.
+    const thisDev = isTop && !globalTop && path && !this.isInStore
     const srcDev = !sourceReference || srcTop && !srcGlobalTop && srcPath
     if (thisDev && srcDev) {
       this.#loadDepType(this.package.devDependencies, 'dev', ad)
@@ -1074,9 +1110,9 @@ class Node {
   // return true if it's safe to remove this node, because anything that
   // is depending on it would be fine with the thing that they would resolve
   // to if it was removed, or nothing is depending on it in the first place.
-  canDedupe (preferDedupe = false) {
-    // not allowed to mess with shrinkwraps or bundles
-    if (this.inDepBundle || this.inShrinkwrap) {
+  canDedupe (preferDedupe = false, explicitRequest = false) {
+    // not allowed to mess with bundles
+    if (this.inDepBundle) {
       return false
     }
 
@@ -1114,6 +1150,11 @@ class Node {
 
     // if our current version isn't the result of an override, then prefer to take the greater version
     if (!this.overridden && semver.gt(other.version, this.version)) {
+      return true
+    }
+
+    // if the other version was an explicit request, then prefer to take the other version
+    if (explicitRequest) {
       return true
     }
 
@@ -1218,11 +1259,6 @@ class Node {
     treeCheck(this)
   }
 
-  get inShrinkwrap () {
-    return this.parent &&
-      (this.parent.hasShrinkwrap || this.parent.inShrinkwrap)
-  }
-
   get parent () {
     // setter prevents _parent from being this
     return this[_parent]
@@ -1234,7 +1270,7 @@ class Node {
   // with another by the same name (eg, to update or dedupe).
   // This does a couple of walks out on the node_modules tree, recursing
   // into child nodes.  However, as setting the parent is typically done
-  // with nodes that don't have have many children, and (deduped) package
+  // with nodes that don't have many children, and (deduped) package
   // trees tend to be broad rather than deep, it's not that bad.
   // The only walk that starts from the parent rather than this node is
   // limited by edge name.
@@ -1378,7 +1414,7 @@ class Node {
   }
 
   recalculateOutEdgesOverrides () {
-    // For each edge out propogate the new overrides through.
+    // For each edge out propagate the new overrides through.
     for (const edge of this.edgesOut.values()) {
       edge.reload(true)
       if (edge.to) {
@@ -1578,6 +1614,22 @@ class Node {
 
   [util.inspect.custom] () {
     return this.toJSON()
+  }
+
+  resetDepFlags () {
+    this.extraneous = true
+    this.dev = true
+    this.optional = true
+    this.devOptional = true
+    this.peer = true
+  }
+
+  unsetDepFlags () {
+    this.extraneous = false
+    this.dev = false
+    this.optional = false
+    this.devOptional = false
+    this.peer = false
   }
 }
 

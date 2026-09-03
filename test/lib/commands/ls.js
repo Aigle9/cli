@@ -263,7 +263,7 @@ t.test('ls', async t => {
     await
 
     ls.exec([])
-    t.matchSnapshot(cleanCwd(result()), 'should contain overridden outout')
+    t.matchSnapshot(cleanCwd(result()), 'should contain overridden output')
   })
 
   t.test('overridden dep w/ color', async t => {
@@ -305,7 +305,93 @@ t.test('ls', async t => {
     })
 
     await ls.exec([])
-    t.matchSnapshot(cleanCwd(result()), 'should contain overridden outout')
+    t.matchSnapshot(cleanCwd(result()), 'should contain overridden output')
+  })
+
+  const packageExtensionsPrefix = {
+    'package.json': JSON.stringify({
+      name: 'test-package-extensions',
+      version: '1.0.0',
+      dependencies: { foo: '^1.0.0' },
+      packageExtensions: { 'foo@1': { dependencies: { bar: '^1.0.0' } } },
+    }),
+    node_modules: {
+      '.package-lock.json': JSON.stringify({
+        packages: {
+          'node_modules/foo': {
+            version: '1.0.0',
+            dependencies: { bar: '^1.0.0' },
+            packageExtensionsApplied: { selector: 'foo@1', dependencies: ['bar'] },
+          },
+          'node_modules/bar': { version: '1.0.0' },
+        },
+      }),
+      foo: {
+        'package.json': JSON.stringify({ name: 'foo', version: '1.0.0', dependencies: { bar: '^1.0.0' } }),
+      },
+      bar: { 'package.json': JSON.stringify({ name: 'bar', version: '1.0.0' }) },
+    },
+  }
+
+  t.test('packageExtensions dep', async t => {
+    const { npm, result, ls } = await mockLs(t, { config: {}, prefixDir: packageExtensionsPrefix })
+    touchHiddenPackageLock(npm.prefix)
+    await ls.exec([])
+    t.matchSnapshot(cleanCwd(result()), 'human output annotates the extended node')
+  })
+
+  t.test('packageExtensions dep --json', async t => {
+    const { npm, result, ls } = await mockLs(t, {
+      config: { json: true },
+      prefixDir: packageExtensionsPrefix,
+    })
+    touchHiddenPackageLock(npm.prefix)
+    await ls.exec([])
+    const applied = JSON.parse(result()).dependencies.foo.packageExtensionsApplied
+    t.match(applied, { selector: 'foo@1', dependencies: ['bar'] }, 'json output includes provenance')
+  })
+
+  const npmExtensionPrefix = {
+    'package.json': JSON.stringify({
+      name: 'test-npm-extension',
+      version: '1.0.0',
+      dependencies: { foo: '^1.0.0' },
+    }),
+    node_modules: {
+      '.package-lock.json': JSON.stringify({
+        packages: {
+          'node_modules/foo': {
+            version: '1.0.0',
+            dependencies: { bar: '^1.0.0' },
+            npmExtensionApplied: { extensionPoint: 'transformManifest', dependencies: ['bar'] },
+          },
+          'node_modules/bar': { version: '1.0.0' },
+        },
+      }),
+      foo: {
+        'package.json': JSON.stringify({ name: 'foo', version: '1.0.0', dependencies: { bar: '^1.0.0' } }),
+      },
+      bar: { 'package.json': JSON.stringify({ name: 'bar', version: '1.0.0' }) },
+    },
+  }
+
+  t.test('.npm-extension dep', async t => {
+    const { npm, result, ls } = await mockLs(t, { config: {}, prefixDir: npmExtensionPrefix })
+    touchHiddenPackageLock(npm.prefix)
+    await ls.exec([])
+    t.matchSnapshot(cleanCwd(result()), 'human output annotates the transformed node')
+  })
+
+  t.test('.npm-extension dep --json', async t => {
+    const { npm, result, ls } = await mockLs(t, {
+      config: { json: true },
+      prefixDir: npmExtensionPrefix,
+    })
+    touchHiddenPackageLock(npm.prefix)
+    await ls.exec([])
+    const applied = JSON.parse(result()).dependencies.foo.npmExtensionApplied
+    t.match(applied, { extensionPoint: 'transformManifest', dependencies: ['bar'] },
+      'json output includes provenance')
   })
 
   t.test('with filter arg', async t => {
@@ -329,7 +415,7 @@ t.test('ls', async t => {
     await ls.exec(['chai'])
     t.matchSnapshot(
       cleanCwd(result()),
-      'should output tree contaning only occurrences of filtered by package and colored output'
+      'should output tree containing only occurrences of filtered by package and colored output'
     )
   })
 
@@ -355,7 +441,7 @@ t.test('ls', async t => {
     await ls.exec(['.'])
     t.matchSnapshot(
       cleanCwd(result()),
-      'should output tree contaning only occurrences of filtered by package and colored output'
+      'should output tree containing only occurrences of filtered by package and colored output'
     )
   })
 
@@ -377,7 +463,7 @@ t.test('ls', async t => {
     await ls.exec(['dog'])
     t.matchSnapshot(
       cleanCwd(result()),
-      'should output tree contaning only occurrences of filtered package and its ancestors'
+      'should output tree containing only occurrences of filtered package and its ancestors'
     )
   })
 
@@ -408,7 +494,7 @@ t.test('ls', async t => {
     await ls.exec(['dog@*', 'chai@1.0.0'])
     t.matchSnapshot(
       cleanCwd(result()),
-      'should output tree contaning only occurrences of multiple filtered packages and their ancestors'
+      'should output tree containing only occurrences of multiple filtered packages and their ancestors'
     )
   })
 
@@ -1650,7 +1736,7 @@ t.test('ls', async t => {
     }))
 
     // filter out a single workspace and include root
-    t.test('should inlude root and specified workspace', t => mockWorkspaces(t, [], {
+    t.test('should include root and specified workspace', t => mockWorkspaces(t, [], {
       'include-workspace-root': true,
       workspace: 'd',
     }))
@@ -1823,7 +1909,7 @@ t.test('ls --parseable', async t => {
     })
 
     await ls.exec([])
-    t.matchSnapshot(cleanCwd(result()), 'should contain overridden outout')
+    t.matchSnapshot(cleanCwd(result()), 'should contain overridden output')
   })
 
   t.test('with filter arg', async t => {
@@ -1844,7 +1930,7 @@ t.test('ls --parseable', async t => {
     await ls.exec(['chai'])
     t.matchSnapshot(
       cleanCwd(result()),
-      'should output parseable contaning only occurrences of filtered by package'
+      'should output parseable containing only occurrences of filtered by package'
     )
   })
 
@@ -1866,7 +1952,7 @@ t.test('ls --parseable', async t => {
     await ls.exec(['dog'])
     t.matchSnapshot(
       cleanCwd(result()),
-      'should output parseable contaning only occurrences of filtered package'
+      'should output parseable containing only occurrences of filtered package'
     )
   })
 
@@ -1897,7 +1983,7 @@ t.test('ls --parseable', async t => {
     await ls.exec(['dog@*', 'chai@1.0.0'])
     t.matchSnapshot(
       cleanCwd(result()),
-      'should output parseable contaning only occurrences of multiple filtered packages and their ancestors'
+      'should output parseable containing only occurrences of multiple filtered packages and their ancestors'
     )
   })
 
@@ -2941,7 +3027,7 @@ t.test('ls --json', async t => {
           },
         },
       },
-      'should output json contaning only occurrences of filtered by package'
+      'should output json containing only occurrences of filtered by package'
     )
     t.not(process.exitCode, 1, 'should not exit with error code 1')
   })
@@ -2982,7 +3068,7 @@ t.test('ls --json', async t => {
           },
         },
       },
-      'should output json contaning only occurrences of filtered by package'
+      'should output json containing only occurrences of filtered by package'
     )
     t.notOk(jsonParse(result()).dependencies.chai)
   })
@@ -3036,7 +3122,7 @@ t.test('ls --json', async t => {
           },
         },
       },
-      'should output json contaning only occurrences of multiple filtered packages and their ancestors'
+      'should output json containing only occurrences of multiple filtered packages and their ancestors'
     )
   })
 
@@ -3838,7 +3924,7 @@ t.test('ls --json', async t => {
     await t.rejects(
       ls.exec([]),
       { code: 'EJSONPARSE', message: 'Failed to parse root package.json' },
-      'should have missin root package.json msg'
+      'should have missing root package.json msg'
     )
     t.same(
       jsonParse(result()),
@@ -4225,7 +4311,7 @@ t.test('ls --json', async t => {
           abbrev: {
             version: '1.1.1',
             overridden: false,
-            resolved: 'git+ssh://git@github.com/isaacs/abbrev-js.git#b8f3a2fc0c3bb8ffd8b0d0072cc6b5a3667e963c',
+            resolved: 'git+https://github.com/isaacs/abbrev-js.git#b8f3a2fc0c3bb8ffd8b0d0072cc6b5a3667e963c',
           },
         },
       },
@@ -4664,7 +4750,7 @@ t.test('ls --package-lock-only', async t => {
             },
           },
         },
-        'should output json contaning only occurrences of filtered by package'
+        'should output json containing only occurrences of filtered by package'
       )
       t.notOk(process.exitCode, 'should not set exit code')
     })
@@ -4724,7 +4810,7 @@ t.test('ls --package-lock-only', async t => {
             },
           },
         },
-        'should output json contaning only occurrences of filtered by package'
+        'should output json containing only occurrences of filtered by package'
       )
     })
 
@@ -4788,7 +4874,7 @@ t.test('ls --package-lock-only', async t => {
             },
           },
         },
-        'should output json contaning only occurrences of multiple filtered packages and their ancestors'
+        'should output json containing only occurrences of multiple filtered packages and their ancestors'
       )
     })
 
@@ -5283,5 +5369,201 @@ t.test('ls --package-lock-only', async t => {
         'should output json containing git refs'
       )
     })
+  })
+})
+
+t.test('completion', async t => {
+  const { ls } = await mockNpm(t, {
+    command: 'ls',
+    prefixDir: {
+      node_modules: {
+        foo: {
+          'package.json': JSON.stringify({ name: 'foo', version: '1.0.0' }),
+        },
+      },
+      'package.json': JSON.stringify({ name: 'project', version: '1.0.0' }),
+    },
+  })
+  const res = await ls.completion({ conf: { argv: { remain: ['npm', 'ls'] } } })
+  t.type(res, Array)
+})
+
+t.test('ls --install-strategy=linked', async t => {
+  t.test('should not report undeclared workspaces as UNMET DEPENDENCY', async t => {
+    const { result, ls } = await mockLs(t, {
+      config: {
+        'install-strategy': 'linked',
+      },
+      prefixDir: {
+        'package.json': JSON.stringify({
+          name: 'test-linked-ws',
+          version: '1.0.0',
+          workspaces: ['packages/*'],
+          dependencies: { 'workspace-a': '*' },
+        }),
+        packages: {
+          'workspace-a': {
+            'package.json': JSON.stringify({
+              name: 'workspace-a',
+              version: '1.0.0',
+            }),
+          },
+          'workspace-b': {
+            'package.json': JSON.stringify({
+              name: 'workspace-b',
+              version: '1.0.0',
+            }),
+          },
+        },
+        node_modules: {
+          'workspace-a': t.fixture('symlink', '../packages/workspace-a'),
+          // workspace-b intentionally NOT linked (undeclared in dependencies)
+        },
+      },
+    })
+    await ls.exec([])
+    const output = cleanCwd(result())
+    t.notMatch(output, /UNMET DEPENDENCY/, 'should not report undeclared workspace as UNMET DEPENDENCY')
+    t.match(output, /workspace-a/, 'should list declared workspace')
+    t.match(output, /workspace-b/, 'should list undeclared workspace (npm/cli#9618)')
+  })
+
+  t.test('should not report devDeps of store packages as UNMET DEPENDENCY', async t => {
+    const { result, ls } = await mockLs(t, {
+      config: {
+        'install-strategy': 'linked',
+      },
+      prefixDir: {
+        'package.json': JSON.stringify({
+          name: 'test-linked-store',
+          version: '1.0.0',
+          dependencies: { nopt: '^1.0.0' },
+        }),
+        node_modules: {
+          nopt: t.fixture('symlink', '.store/nopt@1.0.0/node_modules/nopt'),
+          '.store': {
+            'nopt@1.0.0': {
+              node_modules: {
+                nopt: {
+                  'package.json': JSON.stringify({
+                    name: 'nopt',
+                    version: '1.0.0',
+                    devDependencies: { tap: '^16.0.0' },
+                  }),
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+    await ls.exec([])
+    const output = cleanCwd(result())
+    t.notMatch(output, /UNMET DEPENDENCY/, 'should not report devDeps of store packages')
+    t.match(output, /nopt/, 'should list the dependency')
+  })
+
+  t.test('should not report devDeps of linked transitive packages as UNMET DEPENDENCY', async t => {
+    const { result, ls } = await mockLs(t, {
+      config: {
+        'install-strategy': 'linked',
+        all: true,
+      },
+      prefixDir: {
+        'package.json': JSON.stringify({
+          name: 'test-linked-transitive',
+          version: '1.0.0',
+          dependencies: { 'pkg-a': 'file:./pkg-a' },
+        }),
+        'pkg-a': {
+          'package.json': JSON.stringify({
+            name: 'pkg-a',
+            version: '1.0.0',
+            devDependencies: { tap: '^16.0.0' },
+          }),
+        },
+        node_modules: {
+          'pkg-a': t.fixture('symlink', '../pkg-a'),
+        },
+      },
+    })
+    await ls.exec([])
+    const output = cleanCwd(result())
+    t.notMatch(output, /UNMET DEPENDENCY/, 'should not report devDeps of linked transitive packages')
+    t.notMatch(output, /tap/, 'should not traverse devDeps of linked transitive packages')
+    t.match(output, /pkg-a/, 'should list the dependency')
+  })
+
+  t.test('should still report declared workspace as UNMET DEPENDENCY when missing', async t => {
+    const { ls } = await mockLs(t, {
+      config: {
+        'install-strategy': 'linked',
+      },
+      prefixDir: {
+        'package.json': JSON.stringify({
+          name: 'test-linked-ws-missing',
+          version: '1.0.0',
+          workspaces: ['packages/*'],
+          dependencies: { 'workspace-a': '*' },
+        }),
+        packages: {
+          'workspace-a': {
+            'package.json': JSON.stringify({
+              name: 'workspace-a',
+              version: '1.0.0',
+            }),
+          },
+        },
+        node_modules: {
+          // workspace-a is declared but its symlink is missing
+        },
+      },
+    })
+    await t.rejects(ls.exec([]), { code: 'ELSPROBLEMS' },
+      'should report declared workspace as UNMET DEPENDENCY')
+  })
+})
+
+t.test('patched dependency annotation', async t => {
+  const patchedLock = {
+    name: 'test-npm-ls',
+    version: '1.0.0',
+    lockfileVersion: 4,
+    requires: true,
+    packages: {
+      '': { name: 'test-npm-ls', version: '1.0.0', dependencies: { foo: '^1.0.0' } },
+      'node_modules/foo': {
+        version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/foo/-/foo-1.0.0.tgz',
+        integrity: 'sha512-deadbeef',
+        patched: { path: 'patches/foo@1.0.0.patch', integrity: 'sha512-abc' },
+      },
+    },
+  }
+  const prefixDir = {
+    'package.json': JSON.stringify({
+      name: 'test-npm-ls',
+      version: '1.0.0',
+      dependencies: { foo: '^1.0.0' },
+      patchedDependencies: { 'foo@1.0.0': 'patches/foo@1.0.0.patch' },
+    }),
+    node_modules: {
+      '.package-lock.json': JSON.stringify(patchedLock),
+      foo: { 'package.json': JSON.stringify({ name: 'foo', version: '1.0.0' }) },
+    },
+  }
+
+  t.test('human output annotates the patched dependency', async t => {
+    const { npm, result, ls } = await mockLs(t, { config: {}, prefixDir })
+    touchHiddenPackageLock(npm.prefix)
+    await ls.exec([])
+    t.match(result(), /foo@1\.0\.0 \[patched: patches\/foo@1\.0\.0\.patch\]/)
+  })
+
+  t.test('json output records the patch path', async t => {
+    const { npm, result, ls } = await mockLs(t, { config: { json: true }, prefixDir })
+    touchHiddenPackageLock(npm.prefix)
+    await ls.exec([])
+    t.equal(JSON.parse(result()).dependencies.foo.patched, 'patches/foo@1.0.0.patch')
   })
 })

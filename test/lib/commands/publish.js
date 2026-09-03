@@ -3,8 +3,13 @@ const { loadNpmWithRegistry } = require('../../fixtures/mock-npm')
 const { cleanZlib } = require('../../fixtures/clean-snapshot')
 const pacote = require('pacote')
 const Arborist = require('@npmcli/arborist')
+const npa = require('npm-package-arg')
+const ssri = require('ssri')
 const path = require('node:path')
 const fs = require('node:fs')
+const { circleciIdToken, githubIdToken, gitlabIdToken, oidcPublishTest, mockOidc } = require('../../fixtures/mock-oidc')
+const { sigstoreIdToken } = require('@npmcli/mock-registry/lib/provenance')
+const mockGlobals = require('@npmcli/mock-globals')
 
 const pkg = '@npmcli/test-package'
 const token = 'test-auth-token'
@@ -52,7 +57,7 @@ t.test('respects publishConfig.registry, runs appropriate scripts', async t => {
   t.equal(fs.existsSync(path.join(prefix, 'scripts-prepublish')), false, 'did not run prepublish')
   t.equal(fs.existsSync(path.join(prefix, 'scripts-publish')), true, 'ran publish')
   t.equal(fs.existsSync(path.join(prefix, 'scripts-postpublish')), true, 'ran postpublish')
-  t.same(logs.warn, ['Unknown publishConfig config "other". This will stop working in the next major version of npm.'])
+  t.same(logs.warn, ['Unknown publishConfig config "other". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.'])
 })
 
 t.test('re-loads publishConfig.registry if added during script process', async t => {
@@ -148,6 +153,25 @@ t.test('dry-run', async t => {
   t.matchSnapshot(logs.notice)
 })
 
+for (const allowDirectory of ['none', 'root']) {
+  t.test(`dry-run with allow-directory=${allowDirectory}`, async t => {
+    const { joinedOutput, npm, registry } = await loadNpmWithRegistry(t, {
+      config: {
+        'allow-directory': allowDirectory,
+        'dry-run': true,
+        ...auth,
+      },
+      prefixDir: {
+        'package.json': JSON.stringify(pkgJson, null, 2),
+      },
+      authorization: token,
+    })
+    registry.publish(pkg, { noPut: true })
+    await npm.exec('publish', [])
+    t.equal(joinedOutput(), `+ ${pkg}@1.0.0`)
+  })
+}
+
 t.test('foreground-scripts defaults to true', async t => {
   const { outputs, npm, logs, registry } = await loadNpmWithRegistry(t, {
     config: {
@@ -171,12 +195,8 @@ t.test('foreground-scripts defaults to true', async t => {
   t.matchSnapshot(logs.notice)
   t.strictSame(
     outputs,
-    [
-      '\n> test-fg-scripts@0.0.0 prepack\n> echo prepack!\n',
-      '\n> test-fg-scripts@0.0.0 postpack\n> echo postpack!\n',
-      `+ test-fg-scripts@0.0.0`,
-    ],
-    'prepack and postpack log to stdout')
+    [`+ test-fg-scripts@0.0.0`],
+    'published package is the only stdout output')
 })
 
 t.test('foreground-scripts can still be set to false', async t => {
@@ -213,6 +233,67 @@ t.test('foreground-scripts can still be set to false', async t => {
 t.test('shows usage with wrong set of arguments', async t => {
   const { publish } = await loadNpmWithRegistry(t, { command: 'publish' })
   await t.rejects(publish.exec(['a', 'b', 'c']), publish.usage)
+})
+
+t.test('fails for a non-private package containing packageExtensions', async t => {
+  const { npm } = await loadNpmWithRegistry(t, {
+    config: { ...auth },
+    prefixDir: {
+      'package.json': JSON.stringify({
+        ...pkgJson,
+        packageExtensions: { 'foo@1': { dependencies: { bar: '^1.0.0' } } },
+      }, null, 2),
+    },
+    authorization: token,
+  })
+  await t.rejects(
+    npm.exec('publish', []),
+    { code: 'EPACKAGEEXTENSIONS', message: /must not be published/ },
+    'refuses to publish'
+  )
+})
+
+t.test('fails on --dry-run for a package containing packageExtensions', async t => {
+  const { npm } = await loadNpmWithRegistry(t, {
+    config: { 'dry-run': true, ...auth },
+    prefixDir: {
+      'package.json': JSON.stringify({
+        ...pkgJson,
+        packageExtensions: { 'foo@1': { dependencies: { bar: '^1.0.0' } } },
+      }, null, 2),
+    },
+    authorization: token,
+  })
+  await t.rejects(
+    npm.exec('publish', []),
+    { code: 'EPACKAGEEXTENSIONS' },
+    'dry-run also reports the failure'
+  )
+})
+
+t.test('fails when a lifecycle script injects packageExtensions before the re-read', async t => {
+  const { npm } = await loadNpmWithRegistry(t, {
+    config: { ...auth },
+    prefixDir: {
+      'package.json': JSON.stringify({
+        ...pkgJson,
+        scripts: { prepublishOnly: 'node inject.js' },
+      }, null, 2),
+      // the first manifest read is clean; this hook adds packageExtensions before the authoritative re-read
+      'inject.js': [
+        "const fs = require('fs')",
+        "const p = JSON.parse(fs.readFileSync('package.json'))",
+        "p.packageExtensions = { 'foo@1': { dependencies: { bar: '^1.0.0' } } }",
+        "fs.writeFileSync('package.json', JSON.stringify(p))",
+      ].join('\n'),
+    },
+    authorization: token,
+  })
+  await t.rejects(
+    npm.exec('publish', []),
+    { code: 'EPACKAGEEXTENSIONS' },
+    'the post-script manifest re-read catches the injected field'
+  )
 })
 
 t.test('throws when invalid tag is semver', async t => {
@@ -560,7 +641,7 @@ t.test('workspaces', t => {
     t.matchSnapshot(joinedOutput(), 'all workspaces in json')
   })
 
-  t.test('differet package spec', async t => {
+  t.test('different package spec', async t => {
     const testDir = {
       'package.json': JSON.stringify(
         {
@@ -739,6 +820,27 @@ t.test('restricted access', async t => {
   t.matchSnapshot(logs.notice)
 })
 
+t.test('private access', async t => {
+  const packageJson = {
+    name: '@npm/test-package',
+    version: '1.0.0',
+  }
+  const { npm, joinedOutput, logs, registry } = await loadNpmWithRegistry(t, {
+    config: {
+      ...auth,
+      access: 'private',
+    },
+    prefixDir: {
+      'package.json': JSON.stringify(packageJson, null, 2),
+    },
+    authorization: token,
+  })
+  registry.publish('@npm/test-package', { packageJson, access: 'restricted' })
+  await npm.exec('publish', [])
+  t.matchSnapshot(joinedOutput(), 'new package version')
+  t.matchSnapshot(logs.notice)
+})
+
 t.test('public access', async t => {
   const { npm, joinedOutput, logs, registry } = await loadNpmWithRegistry(t, {
     config: {
@@ -810,7 +912,7 @@ t.test('manifest', async t => {
   }
   delete manifest.gitHead
 
-  manifest.man.sort()
+  manifest.man?.sort()
 
   t.matchSnapshot(manifest, 'manifest')
 })
@@ -987,4 +1089,900 @@ t.test('semver highest dist tag', async t => {
     registry.publish(pkg, { noGet: true, packuments })
     await npm.exec('publish', [])
   })
+})
+
+t.test('oidc token exchange - no provenance', t => {
+  const githubPrivateIdToken = githubIdToken({ visibility: 'private' })
+  const gitlabPrivateIdToken = gitlabIdToken({ visibility: 'private' })
+
+  t.test('oidc token 500 with fallback', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      statusCode: 500,
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'verbose oidc Failed to fetch id_token from GitHub: received an invalid response',
+    ],
+  }))
+
+  t.test('oidc token invalid body with fallback', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: null,
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'verbose oidc Failed to fetch id_token from GitHub: missing value',
+    ],
+  }))
+
+  t.test('token exchange 500 with fallback', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPrivateIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      statusCode: 500,
+      idToken: githubPrivateIdToken,
+      body: {
+        message: 'oidc token exchange failed',
+      },
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'verbose oidc Failed token exchange request with body message: oidc token exchange failed',
+    ],
+  }))
+
+  t.test('token exchange 500 with no body message with fallback', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPrivateIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPrivateIdToken,
+      statusCode: 500,
+      body: undefined,
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'verbose oidc Failed token exchange request with body message: Unknown error',
+    ],
+  }))
+
+  t.test('token exchange invalid body with fallback', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPrivateIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPrivateIdToken,
+      body: {
+        token: null,
+      },
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'verbose oidc Failed because token exchange was missing the token in the response body',
+    ],
+  }))
+
+  t.test('github missing ACTIONS_ID_TOKEN_REQUEST_URL', oidcPublishTest({
+    oidcOptions: { github: true, ACTIONS_ID_TOKEN_REQUEST_URL: '' },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'silly oidc Skipped because incorrect permissions for id-token within GitHub workflow',
+    ],
+  }))
+
+  t.test('gitlab missing NPM_ID_TOKEN', oidcPublishTest({
+    oidcOptions: { gitlab: true, NPM_ID_TOKEN: '' },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'silly oidc Skipped because no id_token available',
+    ],
+  }))
+
+  t.test('no ci', oidcPublishTest({
+    oidcOptions: { github: false, gitlab: false },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+  }))
+
+  // default registry success
+
+  t.test('default registry success github', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPrivateIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPrivateIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+  }))
+
+  t.test('global try-catch failure via malformed url', oidcPublishTest({
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    oidcOptions: {
+      github: true,
+      // malformed url should trigger a global try-catch
+      ACTIONS_ID_TOKEN_REQUEST_URL: '//github.com',
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'verbose oidc Failure with message: Invalid URL',
+    ],
+  }))
+
+  t.test('global try-catch failure via throw non Error', async t => {
+    const { npm, logs, joinedOutput, ACTIONS_ID_TOKEN_REQUEST_URL } = await mockOidc(t, {
+      config: {
+        '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+      },
+      oidcOptions: {
+        github: true,
+      },
+      publishOptions: {
+        token: 'existing-fallback-token',
+      },
+    })
+
+    class URLOverride extends URL {
+      constructor (...args) {
+        const [url] = args
+        if (url === ACTIONS_ID_TOKEN_REQUEST_URL) {
+          throw 'Specifically throwing a non error object to test global try-catch'
+        }
+        super(...args)
+      }
+    }
+
+    mockGlobals(t, {
+      URL: URLOverride,
+    })
+
+    await npm.exec('publish', [])
+    t.match(joinedOutput(), '+ @npmcli/test-package@1.0.0')
+    t.ok(logs.includes('verbose oidc Failure with message: Unknown error'))
+  })
+
+  t.test('default registry success gitlab', oidcPublishTest({
+    oidcOptions: { gitlab: true, NPM_ID_TOKEN: gitlabPrivateIdToken },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: gitlabPrivateIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+  }))
+
+  t.test('circleci missing NPM_ID_TOKEN', oidcPublishTest({
+    oidcOptions: { circleci: true, NPM_ID_TOKEN: '' },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'silly oidc Skipped because no id_token available',
+    ],
+  }))
+
+  t.test('default registry success circleci', oidcPublishTest({
+    oidcOptions: { circleci: true, NPM_ID_TOKEN: circleciIdToken() },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: circleciIdToken(),
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+  }))
+
+  // custom registry success
+
+  t.test('custom registry config success github', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      registry: 'https://registry.zzz.org',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.zzz.org',
+      idToken: githubPrivateIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPrivateIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+  }))
+
+  t.test('custom registry scoped config success github', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '@npmcli:registry': 'https://registry.zzz.org',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.zzz.org',
+      idToken: githubPrivateIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPrivateIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+    load: {
+      registry: 'https://registry.zzz.org',
+    },
+  }))
+
+  t.test('custom registry publishConfig success github', oidcPublishTest({
+    oidcOptions: { github: true },
+    packageJson: {
+      publishConfig: {
+        registry: 'https://registry.zzz.org',
+      },
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.zzz.org',
+      idToken: githubPrivateIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPrivateIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+    load: {
+      registry: 'https://registry.zzz.org',
+    },
+  }))
+
+  t.test('dry-run can be used to check oidc config but not publish', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+      'dry-run': true,
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPrivateIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPrivateIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      noPut: true,
+    },
+  }))
+
+  t.end()
+})
+
+t.test('oidc token exchange - provenance', (t) => {
+  const githubPrivateIdToken = githubIdToken({ visibility: 'private' })
+  const githubPublicIdToken = githubIdToken({ visibility: 'public' })
+  const gitlabPublicIdToken = gitlabIdToken({ visibility: 'public' })
+  const SIGSTORE_ID_TOKEN = sigstoreIdToken()
+
+  t.test('default registry success github', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPublicIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPublicIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+    provenance: true,
+    oidcVisibilityOptions: { public: true },
+  }))
+
+  t.test('default registry success gitlab', oidcPublishTest({
+    oidcOptions: { gitlab: true, NPM_ID_TOKEN: gitlabPublicIdToken, SIGSTORE_ID_TOKEN },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: gitlabPublicIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+    provenance: true,
+    oidcVisibilityOptions: { public: true },
+  }))
+
+  t.test('default registry success gitlab without SIGSTORE_ID_TOKEN', oidcPublishTest({
+    oidcOptions: { gitlab: true, NPM_ID_TOKEN: gitlabPublicIdToken },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: gitlabPublicIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+    provenance: false,
+  }))
+
+  /**
+   * when the user sets provenance to true or false
+   * the OIDC flow should not concern itself with provenance at all
+   */
+  t.test('setting provenance true in config should enable provenance', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+      provenance: true,
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPublicIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPublicIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+    provenance: true,
+  }))
+
+  t.test('setting provenance false in config should not use provenance', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+      provenance: false,
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPublicIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPublicIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+  }))
+
+  const provenanceFileSources = [
+    {
+      name: 'CLI config',
+      options: provenanceBundlePath => ({
+        config: {
+          'provenance-file': provenanceBundlePath,
+        },
+      }),
+    },
+    {
+      // exercises Publish.#getManifest() and its flatten(filteredPublishConfig, opts)
+      // path: publishConfig must reach opts.provenanceFile before oidc() decides
+      // whether to enable automatic provenance
+      name: 'publishConfig',
+      options: provenanceBundlePath => ({
+        packageJson: {
+          publishConfig: {
+            'provenance-file': provenanceBundlePath,
+          },
+        },
+      }),
+    },
+  ]
+
+  for (const { name, options } of provenanceFileSources) {
+    t.test(`${name} provenance-file takes precedence over OIDC auto-provenance`, async t => {
+      const bundleDir = t.testdir()
+      const provenanceBundlePath = path.join(
+        bundleDir,
+        'provenance-bundle.json'
+      )
+      // holder so the libnpmpack mock can return the tarball computed below
+      const packMock = { tarballData: null }
+
+      const sourceOptions = options(provenanceBundlePath)
+
+      const { npm, registry, prefix, joinedOutput } = await mockOidc(t, {
+        oidcOptions: { github: true },
+        config: {
+          '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+          ...sourceOptions.config,
+        },
+        packageJson: sourceOptions.packageJson,
+        mockGithubOidcOptions: {
+          audience: 'npm:registry.npmjs.org',
+          idToken: githubPublicIdToken,
+        },
+        mockOidcTokenExchangeOptions: {
+          idToken: githubPublicIdToken,
+          body: {
+            token: 'exchange-token',
+          },
+        },
+        publishOptions: {
+          token: 'exchange-token',
+          noPut: true,
+        },
+        load: {
+          mocks: {
+            libnpmaccess: {
+              getVisibility: async () => ({ public: true }),
+            },
+            // publish a deterministic tarball so the bundle subject digest can match it
+            libnpmpack: async () => packMock.tarballData,
+            // libnpmpublish must be mocked as a module so its internal require of
+            // sigstore is intercepted: a user-supplied bundle is only verified,
+            // generation (attest) must never run
+            libnpmpublish: t.mock('libnpmpublish', {
+              'libnpmpublish/lib/provenance': t.mock('libnpmpublish/lib/provenance', {
+                sigstore: {
+                  verify: async () => {},
+                  attest: async () => {
+                    throw new Error('sigstore.attest must not be called when provenance-file is configured')
+                  },
+                },
+              }),
+            }),
+          },
+        },
+      })
+
+      // compute the tarball integrity the same way libnpmpublish does so the
+      // provenance bundle subject matches the packed tarball
+      packMock.tarballData = await pacote.tarball(prefix, { Arborist })
+      const integrity = ssri.fromData(packMock.tarballData, { algorithms: ['sha512'] })
+      const spec = npa.resolve(pkg, '1.0.0')
+      const provenanceBundle = {
+        mediaType: 'application/vnd.dev.sigstore.bundle+json;version=0.2',
+        verificationMaterial: {
+          x509CertificateChain: {
+            certificates: [{ rawBytes: 'dGVzdA==' }],
+          },
+          tlogEntries: [],
+        },
+        dsseEnvelope: {
+          payload: Buffer.from(JSON.stringify({
+            _type: 'https://in-toto.io/Statement/v0.1',
+            subject: [
+              {
+                name: npa.toPurl(spec),
+                digest: { sha512: integrity.sha512[0].hexDigest() },
+              },
+            ],
+            predicateType: 'https://slsa.dev/provenance/v0.2',
+            predicate: {},
+          })).toString('base64'),
+          payloadType: 'application/vnd.in-toto+json',
+          signatures: [{
+            /* eslint-disable-next-line max-len */
+            sig: 'MEUCIQDqHtpkk1d0rMGLmf3qet9jLale3KVn8Pnywpwt7ln+9AIgG9CJvvUmyemhNYHz0DfJ4vMfKk1TMg+m3hR0mISXJos=',
+            keyid: '',
+          }],
+        },
+      }
+      fs.writeFileSync(provenanceBundlePath, JSON.stringify(provenanceBundle, null, 2))
+
+      let publishedBody
+      registry.nock
+        .put(`/${spec.escapedName}`, (body) => {
+          publishedBody = body
+          return true
+        })
+        .matchHeader('authorization', 'Bearer exchange-token')
+        // optional so a failed publish does not leave a pending mock behind
+        .optionally()
+        .reply(200, {})
+
+      // libnpmpublish checks package visibility itself before generating
+      // provenance; optional so it is only consumed if generation is attempted
+      registry.nock
+        .get(`/-/package/${spec.escapedName}/visibility`)
+        .optionally()
+        .reply(200, { public: true })
+
+      await npm.exec('publish', [])
+
+      t.match(joinedOutput(), '+ @npmcli/test-package@1.0.0')
+
+      const attachment =
+        publishedBody?._attachments[`${pkg}-1.0.0.sigstore`]
+
+      t.ok(attachment, 'published packument includes supplied provenance')
+      t.strictSame(
+        JSON.parse(attachment.data),
+        provenanceBundle,
+        'published sigstore bundle is the user-supplied provenance file'
+      )
+    })
+  }
+
+  t.test('automatic provenance does not leak between workspace publishes', async t => {
+    const provenanceBundlePath = path.join(t.testdir(), 'provenance-bundle.json')
+    const autoPackage = 'workspace-auto-provenance'
+    const filePackage = 'workspace-file-provenance'
+    const publishCalls = []
+    const prefixDir = {
+      'package.json': JSON.stringify({
+        name: 'workspace-root',
+        version: '1.0.0',
+        workspaces: [autoPackage, filePackage],
+      }),
+      [autoPackage]: {
+        'package.json': JSON.stringify({
+          name: autoPackage,
+          version: '1.0.0',
+        }),
+      },
+      [filePackage]: {
+        'package.json': JSON.stringify({
+          name: filePackage,
+          version: '1.0.0',
+          publishConfig: {
+            'provenance-file': provenanceBundlePath,
+          },
+        }),
+      },
+    }
+
+    const { npm, registry } = await mockOidc(t, {
+      oidcOptions: { github: true },
+      packageName: autoPackage,
+      config: {
+        '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+        workspaces: true,
+      },
+      mockGithubOidcOptions: {
+        audience: 'npm:registry.npmjs.org',
+        idToken: githubPublicIdToken,
+        times: 2,
+      },
+      mockOidcTokenExchangeOptions: {
+        idToken: githubPublicIdToken,
+        body: {
+          token: 'exchange-token',
+        },
+      },
+      publishOptions: {
+        noPut: true,
+      },
+      load: {
+        prefixDir,
+        mocks: {
+          libnpmaccess: {
+            getVisibility: async () => ({ public: true }),
+          },
+          // mocked as a plain module so the publish options each workspace
+          // receives can be recorded verbatim
+          libnpmpublish: {
+            publish: async (manifest, _tarballData, opts) => {
+              publishCalls.push({
+                name: manifest.name,
+                provenance: opts.provenance,
+                provenanceFile: opts.provenanceFile,
+              })
+            },
+          },
+        },
+      },
+    })
+
+    registry.mockOidcTokenExchange({
+      packageName: filePackage,
+      idToken: githubPublicIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    })
+    registry.publish(filePackage, { noPut: true })
+
+    await npm.exec('publish', [])
+
+    t.strictSame(publishCalls, [
+      {
+        name: autoPackage,
+        provenance: true,
+        provenanceFile: null,
+      },
+      {
+        name: filePackage,
+        provenance: false,
+        provenanceFile: provenanceBundlePath,
+      },
+    ])
+    t.equal(
+      npm.config.isDefault('provenance'),
+      true,
+      'automatic provenance does not mutate shared config'
+    )
+  })
+
+  const brokenJwts = [
+    'x.invalid-jwt.x',
+    'x.invalid-jwt.',
+    'x.invalid-jwt',
+    'x.',
+    'x',
+  ]
+
+  brokenJwts.map((brokenJwt) => {
+    // windows does not like `.` in the filename
+    t.test(`broken jwt ${brokenJwt.replaceAll('.', '_')}`, oidcPublishTest({
+      oidcOptions: { github: true },
+      config: {
+        '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+      },
+      mockGithubOidcOptions: {
+        audience: 'npm:registry.npmjs.org',
+        idToken: brokenJwt,
+      },
+      mockOidcTokenExchangeOptions: {
+        idToken: brokenJwt,
+        body: {
+          token: 'exchange-token',
+        },
+      },
+      publishOptions: {
+        token: 'exchange-token',
+      },
+    }))
+  })
+
+  t.test('token exchange 500 with fallback should not have provenance by default', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPublicIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      statusCode: 500,
+      idToken: githubPublicIdToken,
+      body: {
+        message: 'oidc token exchange failed',
+      },
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'verbose oidc Failed token exchange request with body message: oidc token exchange failed',
+    ],
+    provenance: false,
+  }))
+
+  t.test('attempt to publish a private package with OIDC provenance should be false', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPublicIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPublicIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+    provenance: false,
+    oidcVisibilityOptions: { public: false },
+  }))
+
+  /** this call shows that if the repo is private, the visibility check will not be called */
+  t.test('attempt to publish a private repository with OIDC provenance should be false', oidcPublishTest({
+    oidcOptions: { github: true },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockGithubOidcOptions: {
+      audience: 'npm:registry.npmjs.org',
+      idToken: githubPrivateIdToken,
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: githubPrivateIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+    provenance: false,
+  }))
+
+  const provenanceFailures = [[
+    new Error('Valid error'),
+    'verbose oidc Failed to set provenance with message: Valid error',
+  ], [
+    'Valid error',
+    'verbose oidc Failed to set provenance with message: Unknown error',
+  ]]
+
+  provenanceFailures.forEach(([error, logMessage], index) => {
+    t.test(`provenance visibility check failure, coverage for try-catch ${index}`, async t => {
+      const { npm, logs, joinedOutput } = await mockOidc(t, {
+        load: {
+          mocks: {
+            libnpmaccess: {
+              getVisibility: () => {
+                throw error
+              },
+            },
+          },
+        },
+        oidcOptions: { github: true },
+        config: {
+          '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+        },
+        mockGithubOidcOptions: {
+          audience: 'npm:registry.npmjs.org',
+          idToken: githubPublicIdToken,
+        },
+        mockOidcTokenExchangeOptions: {
+          idToken: githubPublicIdToken,
+          body: {
+            token: 'exchange-token',
+          },
+        },
+        publishOptions: {
+          token: 'exchange-token',
+        },
+        provenance: false,
+      })
+
+      await npm.exec('publish', [])
+      t.match(joinedOutput(), '+ @npmcli/test-package@1.0.0')
+      t.ok(logs.includes(logMessage))
+    })
+  })
+
+  t.end()
+})
+
+t.test('passes script-shell config to lifecycle hooks', async t => {
+  const CAPTURED = []
+  const { npm, registry } = await loadNpmWithRegistry(t, {
+    config: {
+      ...auth,
+      'script-shell': '/bin/bash',
+    },
+    prefixDir: {
+      'package.json': JSON.stringify({
+        ...pkgJson,
+        scripts: {
+          prepublishOnly: 'exit 0',
+          publish: 'exit 0',
+          postpublish: 'exit 0',
+        },
+      }),
+    },
+    mocks: {
+      '@npmcli/run-script': async (opts) => {
+        CAPTURED.push(opts)
+      },
+    },
+  })
+
+  registry.publish(pkg, {})
+  await npm.exec('publish', [])
+
+  for (const event of ['prepublishOnly', 'publish', 'postpublish']) {
+    const rs = CAPTURED.find(r => r.event === event)
+    t.ok(rs, `ran ${event}`)
+    t.equal(rs?.scriptShell, '/bin/bash', `${event} receives scriptShell`)
+  }
 })
